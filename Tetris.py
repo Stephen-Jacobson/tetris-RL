@@ -1,8 +1,9 @@
 from rotations import PIECES, WALL_KICKS, WALL_KICKS_I
-import random
 from TetriminoObj import TetriminoObj
+from typing import Optional
 import numpy as np
 import pygame
+import gymnasium as gym
 
 pygame.init()
 
@@ -33,8 +34,38 @@ screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
 pygame.display.set_caption("Tetris")
 clock = pygame.time.Clock()
 
-class TetrisEnv:
+class TetrisEnv(gym.Env):
+    metadata = {"render_modes": ["human"], "render_fps": 60}
+
     def __init__(self):
+        super().__init__()
+
+        # Gym Spaces
+        self.action_space = gym.spaces.Discrete(8)
+
+        self.observation_space = gym.spaces.Dict(
+            {
+                "board": gym.spaces.Box(
+                    low = 0,
+                    high = 7,
+                    shape = (24, 10),
+                    dtype = np.int32
+                ),
+                "cur_piece_type": gym.spaces.Discrete(7),
+                "cur_piece_rot": gym.spaces.Discrete(4),
+                "cur_piece_pos": gym.spaces.Box(
+                    low = np.array([0, 0], dtype = np.int32),
+                    high = np.array([23, 9], dtype = np.int32),
+                    dtype = np.int32
+                ),
+                "hold_piece": gym.spaces.Discrete(7),
+                "next_piece1": gym.spaces.Discrete(7),
+                "next_piece2": gym.spaces.Discrete(7),
+                "next_piece3": gym.spaces.Discrete(7)
+            }
+        )
+
+        # Game Logic
         self.board = self.create_board()
         self.gravity = 1/60
         self.gravity_counter = 0
@@ -53,9 +84,11 @@ class TetrisEnv:
         self.next_pieces = [] 
         self.combo = [0, False]             #stores amount in combo and whether can be b2b or not
         self.last_rotated = False
-        self.update_next_pieces() 
+        self.update_next_pieces()
     
-    def reset(self):
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
+        super().reset(seed=seed)
+        
         self.board = self.create_board()
         self.gravity = 1/60
         self.gravity_counter = 0
@@ -73,18 +106,51 @@ class TetrisEnv:
         self.next_pieces = []
         self.combo = [0, False]
         self.last_rotated = False
-        self.update_next_pieces() 
+        self.update_next_pieces()
+
         return self.get_state()
+    
+    def _get_obs(self):
+        return {
+            "board": self.board.copy(),             # 24x10 grid
+            "cur_piece_type": self.cur_piece.type,  
+            "cur_piece_rot": self.rot_index,
+            "cur_piece_pos": np.array(self.cur_piece.pos, dtype=np.int32),
+            "hold_piece": self.held_piece,
+            "next_piece1": self.next_pieces[0],
+            "next_piece2": self.next_pieces[1],
+            "next_piece3": self.next_pieces[2]
+        }
+
+    def _get_info(self):
+        """Return auxiliary info for debugging/logging."""
+        return {
+            "level": self.level,                     # current level
+            "points": self.points,                   # current score
+            "lines_cleared": self.clears,           # total lines cleared
+            "combo_count": self.combo[0],           # combo streak
+            "b2b_ready": self.combo[1],             # whether back-to-back is active
+            "current_piece": self.cur_piece.type,   # type of current piece
+            "held_piece": self.held_piece,          # type of held piece
+            "next_pieces": self.next_pieces.copy(), # next 3 pieces
+            "lock_moves": self.lock_moves           # moves made during lock delay
+        }
 
     def get_state(self):
-        # return board + piece info as numpy array
-        pass
+        observation = self._get_obs()
+        info = self._get_info()
+        return observation, info
     
-    def step(self, action):
+    def step(self, action, dt = 1, apply_grivity = True):
         """
-        action: 0=left, 1=right, 2=rotatecw, 3=rotateacw, 4=soft down, 5=hard down, 6=hold piece
+        action: 0=left, 1=right, 2=rotatecw, 3=rotateacw, 4=soft down, 5=hard down, 6=hold piece, 7=do nothing
         returns: state, reward, done, info
         """
+        old_points = self.points
+        done = False
+        
+        if action == 7:         #do nothing :)
+            None
         if action == 6:
             self.hold_piece()
             self.last_rotated = False
@@ -119,6 +185,45 @@ class TetrisEnv:
             
         if action == 3:
             self.rotate_acw()
+
+        if apply_grivity:
+            self.get_gravity()
+            self.gravity_counter += self.gravity
+
+            # Handle gravity-based falling
+            while self.gravity_counter >= 1:
+                self.gravity_counter -= 1
+                if self.get_lowest_row()[0] < 23 and self.get_lowest_row()[1] == False:
+                    self.cur_piece.pos = (self.cur_piece.pos[0] + 1, self.cur_piece.pos[1])
+                    self.cur_piece.pieces = [(r + 1, c) for r, c in self.cur_piece.pieces]
+
+                    self.last_rotated = False
+
+                    self.lock = False
+                    self.lock_timer = 0
+                    self.lock_moves = 0
+                else:
+                    self.lock = True
+                    self.gravity_counter = 0
+                    break
+            
+            if self.lock:
+                self.lock_timer += 1
+
+            if self.lock_timer >= self.auto_lock or self.lock_moves >= 15:
+                    offsets = PIECES[self.cur_piece.type][self.rot_index]
+                    for row, col in self.cur_piece.pieces:
+                        self.board[row][col] = self.cur_piece.type
+                    self.swapped = False
+                    done = self.new_piece()
+            
+            observation = self._get_obs()
+            info = self._get_info()
+
+            # Calculate reward as the change in points
+            reward = self.points - old_points
+
+            return observation, reward, done, False, info
     
     def run(self):
         running = True
@@ -144,8 +249,6 @@ class TetrisEnv:
             # Increment gravity counter
             self.gravity_counter += self.gravity
             
-            
-
             if self.lock_timer >= self.auto_lock or self.lock_moves >= 15:
                 offsets = PIECES[self.cur_piece.type][self.rot_index]
                 for row, col in self.cur_piece.pieces:
@@ -154,14 +257,15 @@ class TetrisEnv:
                 self.new_piece()
             if self.lock:
                 self.lock_timer += dt
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_SPACE:
-                        self.step(5)
+                        self.step(5, dt, False)
                     if event.key == pygame.K_LEFT:
-                        self.step(0)
+                        self.step(0, dt, False)
 
                         left_held = True
                         left_timer = 0
@@ -173,7 +277,7 @@ class TetrisEnv:
                         right_timer = 0
 
                     if event.key == pygame.K_RIGHT:
-                        self.step(1)
+                        self.step(1, dt, False)
 
                         right_held = True
                         right_timer = 0
@@ -184,14 +288,14 @@ class TetrisEnv:
                         left_happened = False
                         left_timer = 0
                     if event.key == pygame.K_UP:
-                        self.step(2)
+                        self.step(2, dt, False)
                     if event.key == pygame.K_DOWN:
-                        self.step(4)
+                        self.step(4, dt, False)
                         down_held = True
                     if event.key == pygame.K_z:
-                        self.step(3)
+                        self.step(3, dt, False)
                     if event.key == pygame.K_c:
-                        self.step(6)
+                        self.step(6, dt, False)
                 elif event.type == pygame.KEYUP:
                     if event.key == pygame.K_LEFT:
                         left_held = False
@@ -207,10 +311,10 @@ class TetrisEnv:
             if left_held:
                 if left_happened:
                     if left_timer > das_repeat:
-                        self.step(0)
+                        self.step(0, dt, False)
                         left_timer = 0
                 elif left_timer > das_initial:
-                    self.step(0)
+                    self.step(0, dt, False)
                     left_happened = True
                     left_timer = 0
                 
@@ -219,16 +323,16 @@ class TetrisEnv:
             if right_held:
                 if right_happened:
                     if right_timer > das_repeat:
-                        self.step(1)
+                        self.step(1, dt, False)
                         right_timer = 0
                 elif right_timer > das_initial:
-                    self.step(1)
+                    self.step(1, dt, False)
                     right_happened = True
                     right_timer = 0
                 
                 right_timer += dt
             if down_held:
-                self.step(4)
+                self.step(4, dt, False)
 
             # Handle gravity-based falling
             while self.gravity_counter >= 1:
@@ -518,15 +622,20 @@ class TetrisEnv:
                 dont_end = True
         if not(dont_end):
             self.reset()
+            return True
+        return False
 
     def new_piece(self):
-        self.check_end()
+        game_over = self.check_end()
+        if game_over:
+            return True
         self.check_clear()
         self.cur_piece = self.spawn_piece()
         self.lock = False
         self.lock_timer = 0
         self.lock_moves = 0
         self.rot_index = 0
+        return False
 
     def wall_kicks(self, dir):           #use when rotating, direction: 0 clockwise, 1 anticlockwise
         num_kick = 0
