@@ -1,4 +1,4 @@
-from rotations import ROTATIONS, PIECES, WALL_KICKS, WALL_KICKS_I
+from rotations import PIECES, WALL_KICKS, WALL_KICKS_I
 import random
 from TetriminoObj import TetriminoObj
 import numpy as np
@@ -89,7 +89,6 @@ class TetrisEnv:
 
     def add_points(self, type_add, drop):
         #types 0 soft drop, 1 hard drop, 2 single, 3 double, 4 triple, 5 tetris, 6 mini tspin no lines, 7 tspin no lines, 8 mini tspin single, 9 tspin single, 10 mini tspin double, 11 tspin double, 12 tspin triple, 13 combo, b2b is separate to switch
-        print("start")
         switch = {
             0: 1 * drop,
             1: 2 * drop,
@@ -107,8 +106,6 @@ class TetrisEnv:
             13: 50 * self.combo[0] * self.level
         }
         if self.combo[1] and 5 <= type_add < 13:
-            print("poes")
-            print(f"{type_add}: {1.5 * switch[type_add]}")
             self.points += 1.5 * switch[type_add]
         else:
             if 5 <= type_add < 13:
@@ -117,15 +114,11 @@ class TetrisEnv:
                 self.combo[1] = False
             if type_add != 13:
                 self.points += switch[type_add]
-                print("tard")
-                print(f"{type_add}: {switch[type_add]}")
 
 
         if 2 <= type_add < 13:
             self.points += switch[13]
             self.combo[0] += 1
-            print("combo")
-            print(self.combo)
         
 
     def hold_piece(self):
@@ -356,7 +349,6 @@ class TetrisEnv:
         max_drop = len(self.board)
         
         offsets = PIECES[self.cur_piece.type][self.rot_index]
-        print(self.cur_piece.pos)
         # Check each block of the current piece
         for offset in offsets:
             block_row = self.cur_piece.pos[0] + offset[0]
@@ -383,7 +375,6 @@ class TetrisEnv:
             row = self.cur_piece.pos[0] + offset[0]
             col = self.cur_piece.pos[1] + offset[1]
             self.board[row][col] = self.cur_piece.type
-        print(self.cur_piece.pos)
         self.swapped = False
         self.new_piece()
 
@@ -395,7 +386,6 @@ class TetrisEnv:
         if not(dont_end):
             self.reset()
 
-
     def new_piece(self):
         self.check_end()
         self.check_clear()
@@ -405,14 +395,13 @@ class TetrisEnv:
         self.lock_moves = 0
         self.rot_index = 0
 
-
     def wall_kicks(self, dir):           #use when rotating, direction: 0 clockwise, 1 anticlockwise
         num_kick = 0
         if dir == 0:
-            temp_in = (self.rot_index + 1) % len(ROTATIONS[self.cur_piece.type])
+            temp_in = (self.rot_index + 1) % 4
             num_kick = 2*self.rot_index + 1         #corresponds correctly to wall kicks tables
         elif dir == 1:
-            temp_in = (self.rot_index - 1) % len(ROTATIONS[self.cur_piece.type])
+            temp_in = (self.rot_index - 1) % 4
             num_kick = 8 - 2*self.rot_index
         
         offsets = PIECES[self.cur_piece.type][temp_in]
@@ -441,9 +430,9 @@ class TetrisEnv:
                     self.lock_timer = 0
 
                 if dir == 0:
-                    self.rot_index = (self.rot_index + 1) % len(ROTATIONS[self.cur_piece.type])
+                    self.rot_index = (self.rot_index + 1) % 4
                 elif dir == 1:
-                    self.rot_index = (self.rot_index - 1) % len(ROTATIONS[self.cur_piece.type])
+                    self.rot_index = (self.rot_index - 1) % 4
                 
                 for k in range(len(self.cur_piece.pieces)):
                     
@@ -500,8 +489,6 @@ class TetrisEnv:
             if self.lock:
                 self.lock_timer += dt
             for event in pygame.event.get():
-                
-                
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:
@@ -596,129 +583,6 @@ class TetrisEnv:
                     
             self.render()
         pygame.quit()
-        # running = True
-        # fall_time = 0
-        # fall_speed = 1000
-
-        # das_initial = 130
-        # das_repeat = 17
-        # left_held = False
-        # left_happened = False
-        # right_held = False
-        # right_happened = False
-        # left_timer = 0
-        # right_timer = 0
-        # down_held = False
-        # self.gravity_counter += self.gravity
-
-        # while running:
-        #     dt = clock.tick(60)
-        #     fall_time += dt
-        #     if self.lock_timer >= 500 or self.lock_moves >= 15:
-        #         offsets = PIECES[self.cur_piece.type][self.rot_index]
-        #         for row, col in self.cur_piece.pieces:
-        #             self.board[row][col] = self.cur_piece.type
-        #         self.swapped = False
-        #         self.new_piece()
-        #     if self.lock:
-        #         self.lock_timer += dt
-        #         print(self.lock_timer)
-        #     for event in pygame.event.get():
-                
-                
-        #         if event.type == pygame.QUIT:
-        #             running = False
-        #         elif event.type == pygame.KEYDOWN:
-        #             if event.key == pygame.K_SPACE:
-        #                 self.step(5)
-        #             if event.key == pygame.K_LEFT:
-        #                 self.step(0)
-
-        #                 left_held = True
-        #                 left_timer = 0
-        #                 left_happened = False
-
-        #                 # reset opposite side completely
-        #                 right_held = False
-        #                 right_happened = False
-        #                 right_timer = 0
-
-        #             if event.key == pygame.K_RIGHT:
-        #                 self.step(1)
-
-        #                 right_held = True
-        #                 right_timer = 0
-        #                 right_happened = False
-
-        #                 # reset opposite side completely
-        #                 left_held = False
-        #                 left_happened = False
-        #                 left_timer = 0
-        #             if event.key == pygame.K_UP:
-        #                 self.step(2)
-        #             if event.key == pygame.K_DOWN:
-        #                 self.step(4)
-        #                 down_held = True
-        #             if event.key == pygame.K_z:
-        #                 self.step(3)
-        #             if event.key == pygame.K_c:
-        #                 self.step(6)
-        #         elif event.type == pygame.KEYUP:
-        #             if event.key == pygame.K_LEFT:
-        #                 left_held = False
-        #                 left_happened = False
-        #                 left_timer = 0
-        #             if event.key == pygame.K_RIGHT:
-        #                 right_held = False
-        #                 right_happened = False
-        #                 right_timer = 0
-        #             if event.key == pygame.K_DOWN:
-        #                 down_held = False
-            
-        #     if left_held:
-        #         if left_happened:
-        #             if left_timer > das_repeat:
-        #                 self.step(0)
-        #                 left_timer = 0
-        #         elif left_timer > das_initial:
-        #             self.step(0)
-        #             left_happened = True
-        #             left_timer = 0
-                
-        #         left_timer += dt
-            
-        #     if right_held:
-        #         if right_happened:
-        #             if right_timer > das_repeat:
-        #                 self.step(1)
-        #                 right_timer = 0
-        #         elif right_timer > das_initial:
-        #             self.step(1)
-        #             right_happened = True
-        #             right_timer = 0
-                
-        #         right_timer += dt
-        #     if down_held:
-        #         self.step(4)
-
-                    
-
-            
-        #     if fall_time > fall_speed:
-        #         if self.get_lowest_row()[0] < 23 and self.get_lowest_row()[1] == False:
-        #             self.cur_piece.pos = (self.cur_piece.pos[0] + 1, self.cur_piece.pos[1])
-        #             self.cur_piece.pieces = [(r + 1, c) for r, c in self.cur_piece.pieces]
-
-        #             self.last_rotated = False
-
-        #             self.lock = False
-        #             self.lock_timer = 0
-        #             self.lock_moves = 0
-        #         else:
-        #             self.lock = True
-        #         fall_time = 0
-        #     self.render()
-        # pygame.quit()
 
     def render(self):
         screen.fill((40, 40, 40))
@@ -871,7 +735,6 @@ class TetrisEnv:
         else:
             cur_piece = TetriminoObj((4,3), [], 0)
         cur_piece.type = type
-        # cur_piece.space = ROTATIONS[cur_piece.type][self.rot_index]
 
         offsets = PIECES[cur_piece.type][self.rot_index]
         top_row = 4
@@ -887,140 +750,11 @@ class TetrisEnv:
         return cur_piece
 
     def rotate_cw(self):
-        # self.rot_index = (self.rot_index + 1) % len(ROTATIONS[self.cur_piece.type])
-        # # self.cur_piece.space = ROTATIONS[self.cur_piece.type][self.rot_index]
-
-        # offsets = PIECES[self.cur_piece.type][self.rot_index]
-        # top_row = 4
-        # left_col = 3
-        # #make logic for i block when rotating it will move side to side and up and down instead of fixed if not corrected
-        # for i in range(len(self.cur_piece.pieces)):
-        #     print(self.cur_piece.pos)
-        #     print(offsets[i])
-        #     self.cur_piece.pieces[i] = (self.cur_piece.pos[0] + offsets[i][0], self.cur_piece.pos[1] + offsets[i][1])
         self.wall_kicks(0)
 
     def rotate_acw(self):
-        # self.rot_index = (self.rot_index - 1) % len(ROTATIONS[self.cur_piece.type])
-        # # self.cur_piece.space = ROTATIONS[self.cur_piece.type][self.rot_index]
-
-        # offsets = PIECES[self.cur_piece.type][self.rot_index]
-        # top_row = 4
-        # left_col = 3
-        # #make logic for i block when rotating it will move side to side and up and down instead of fixed if not corrected
-        # for i in range(len(self.cur_piece.pieces)):
-        #     self.cur_piece.pieces[i] = (self.cur_piece.pieces[i][0] + offsets[i][0], self.cur_piece.pieces[i][1] + offsets[i][1])
         self.wall_kicks(1)
-
-
-
-
-# board = []
-# rot_index = 0
-# piece_bag = ["i", "o", "t", "s", "z", "j", "l"]
-# cur_piece = TetriminoObj([],[], "")
-
-# def make_board():     # 20x10 board
-#     global board
-#     rows = 20 + 4       # +4 to top of grid to account for pieces which rotate at the top
-#     cols = 10
-#     board = np.zeros((rows, cols), dtype = int)
-  
-# def print_board():
-#     for i in range(len(board)):
-#         print(board[i])
-
-# def shuffle_bag():      #tetris uses bad of 7 pieces at a time rather than randomly selecting, to prevent same pieces continuously, 7-bag
-#     global piece_bag
-#     random.shuffle(piece_bag)
-
-# def set_type():
-#     global cur_piece
-#     global piece_bag
-#     global rot_index
-#     cur_piece.type = piece_bag.pop()
-#     rot_index = 0
-
-# def gen_piece():     #types are o, i, t, s, z, j, l
-#     global rot_index
-#     global cur_piece
-
-#     cur_piece.space = ROTATIONS[cur_piece.type][rot_index]
-
-#     offsets = PIECES[cur_piece.type][rot_index]
-#     top_row = 4
-#     left_col = 3
-#     if cur_piece.type == "i":
-#         top_row = 3
-#     cur_piece.pieces = [(top_row + r, left_col + c) for r, c in offsets]
-#     print(cur_piece.pieces)
-        
-# def rotate_cw():
-#     global cur_piece
-#     global rot_index
-#     rot_index = (rot_index + 1) % len(ROTATIONS[cur_piece.type])
-#     cur_piece.space = ROTATIONS[cur_piece.type][rot_index]
-
-#     offsets = PIECES[cur_piece.type][rot_index]
-#     top_row = 4
-#     left_col = 3
-#     #make logic for i block when rotating it will move side to side and up and down instead of fixed if not corrected
-#     cur_piece.pieces = [(top_row + r, left_col + c) for r, c in offsets]
-
-# def rotate_acw():
-#     global cur_piece
-#     global rot_index
-#     rot_index = (rot_index - 1) % len(ROTATIONS[cur_piece.type])
-#     cur_piece.space = ROTATIONS[cur_piece.type][rot_index]
-
-#     offsets = PIECES[cur_piece.type][rot_index]
-#     top_row = 4
-#     left_col = 3
-#     #make logic for i block when rotating it will move side to side and up and down instead of fixed if not corrected
-#     cur_piece.pieces = [(top_row + r, left_col + c) for r, c in offsets]
-
-# def insert_piece():
-#     global board
-#     global cur_piece
-
-#     for i in range(len(cur_piece.pieces)):
-#         board[cur_piece.pieces[i][0]][cur_piece.pieces[i][1]] = "X"
-#     # row_off = 4
-#     # col_off = 3
-#     # j = 0
-#     # i = 0
-#     # br = 0
-#     # blocks = 0
-#     # while i != len(cur_piece.space):
-#     #     while j != len(cur_piece.space[0]):
-#     #         if cur_piece.space[i][j] == " ":
-#     #             j += 1
-#     #             continue
-#     #         board[br][j + col_off] = cur_piece.space[i][j]
-#     #         j += 1
-#     #         blocks += 1
-#     #         if blocks == 4:
-#     #             return
-#     #     if blocks != 0:
-#     #         br += 1
-#     #     i += 1
-#     #     j = 0
-
-
-# def print_piece():
-#     global cur_piece
-#     for i in range(len(cur_piece.space)):
-#         print(cur_piece.space[i])
-
-
-
-
-# def main():
-#     TetrisEnv.run()
     
-
-
-
 if __name__ == "__main__":
     env = TetrisEnv()  # create environment
     env.run()          # start main loop
