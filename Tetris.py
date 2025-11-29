@@ -33,7 +33,6 @@ screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
 pygame.display.set_caption("Tetris")
 clock = pygame.time.Clock()
 
-
 class TetrisEnv:
     def __init__(self):
         self.board = self.create_board()
@@ -76,7 +75,181 @@ class TetrisEnv:
         self.last_rotated = False
         self.update_next_pieces() 
         return self.get_state()
+
+    def get_state(self):
+        # return board + piece info as numpy array
+        pass
     
+    def step(self, action):
+        """
+        action: 0=left, 1=right, 2=rotatecw, 3=rotateacw, 4=soft down, 5=hard down, 6=hold piece
+        returns: state, reward, done, info
+        """
+        if action == 6:
+            self.hold_piece()
+            self.last_rotated = False
+        if action == 5:
+            self.hard_down()
+        if action == 4:
+            if self.get_lowest_row()[0] < 23 and self.get_lowest_row()[1] == False:
+                self.cur_piece.pos = (self.cur_piece.pos[0] + 1, self.cur_piece.pos[1])
+                self.cur_piece.pieces = [(r + 1, c) for r, c in self.cur_piece.pieces]
+                self.add_points(0, 1)
+                self.last_rotated = False
+        if action == 0:
+            if self.left_and_right()[0] > 0 and not(self.get_side_obstruct(-1)):
+                self.cur_piece.pos = (self.cur_piece.pos[0], self.cur_piece.pos[1] - 1)
+                self.cur_piece.pieces = [(r, c - 1) for r, c in self.cur_piece.pieces]
+                self.last_rotated = False
+
+                if self.lock:
+                    self.lock_moves += 1
+                    self.lock_timer = 0
+        if action == 1:
+            if self.left_and_right()[1] < 9 and not(self.get_side_obstruct(1)):
+                self.cur_piece.pos = (self.cur_piece.pos[0], self.cur_piece.pos[1] + 1)
+                self.cur_piece.pieces = [(r, c + 1) for r, c in self.cur_piece.pieces]
+                self.last_rotated = False
+                
+                if self.lock:
+                    self.lock_moves += 1
+                    self.lock_timer = 0
+        if action == 2:
+            self.rotate_cw()
+            
+        if action == 3:
+            self.rotate_acw()
+    
+    def run(self):
+        running = True
+
+        das_initial = 130
+        if self.auto_lock < das_initial:
+            self.auto_lock = das_initial
+        das_repeat = 17
+        left_held = False
+        left_happened = False
+        right_held = False
+        right_happened = False
+        left_timer = 0
+        right_timer = 0
+        down_held = False
+
+        while running:
+            dt = clock.tick(60)
+            
+            # Update gravity based on current level
+            self.get_gravity()
+            
+            # Increment gravity counter
+            self.gravity_counter += self.gravity
+            
+            
+
+            if self.lock_timer >= self.auto_lock or self.lock_moves >= 15:
+                offsets = PIECES[self.cur_piece.type][self.rot_index]
+                for row, col in self.cur_piece.pieces:
+                    self.board[row][col] = self.cur_piece.type
+                self.swapped = False
+                self.new_piece()
+            if self.lock:
+                self.lock_timer += dt
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_SPACE:
+                        self.step(5)
+                    if event.key == pygame.K_LEFT:
+                        self.step(0)
+
+                        left_held = True
+                        left_timer = 0
+                        left_happened = False
+
+                        # reset opposite side completely
+                        right_held = False
+                        right_happened = False
+                        right_timer = 0
+
+                    if event.key == pygame.K_RIGHT:
+                        self.step(1)
+
+                        right_held = True
+                        right_timer = 0
+                        right_happened = False
+
+                        # reset opposite side completely
+                        left_held = False
+                        left_happened = False
+                        left_timer = 0
+                    if event.key == pygame.K_UP:
+                        self.step(2)
+                    if event.key == pygame.K_DOWN:
+                        self.step(4)
+                        down_held = True
+                    if event.key == pygame.K_z:
+                        self.step(3)
+                    if event.key == pygame.K_c:
+                        self.step(6)
+                elif event.type == pygame.KEYUP:
+                    if event.key == pygame.K_LEFT:
+                        left_held = False
+                        left_happened = False
+                        left_timer = 0
+                    if event.key == pygame.K_RIGHT:
+                        right_held = False
+                        right_happened = False
+                        right_timer = 0
+                    if event.key == pygame.K_DOWN:
+                        down_held = False
+            
+            if left_held:
+                if left_happened:
+                    if left_timer > das_repeat:
+                        self.step(0)
+                        left_timer = 0
+                elif left_timer > das_initial:
+                    self.step(0)
+                    left_happened = True
+                    left_timer = 0
+                
+                left_timer += dt
+            
+            if right_held:
+                if right_happened:
+                    if right_timer > das_repeat:
+                        self.step(1)
+                        right_timer = 0
+                elif right_timer > das_initial:
+                    self.step(1)
+                    right_happened = True
+                    right_timer = 0
+                
+                right_timer += dt
+            if down_held:
+                self.step(4)
+
+            # Handle gravity-based falling
+            while self.gravity_counter >= 1:
+                self.gravity_counter -= 1
+                if self.get_lowest_row()[0] < 23 and self.get_lowest_row()[1] == False:
+                    self.cur_piece.pos = (self.cur_piece.pos[0] + 1, self.cur_piece.pos[1])
+                    self.cur_piece.pieces = [(r + 1, c) for r, c in self.cur_piece.pieces]
+
+                    self.last_rotated = False
+
+                    self.lock = False
+                    self.lock_timer = 0
+                    self.lock_moves = 0
+                else:
+                    self.lock = True
+                    self.gravity_counter = 0
+                    break
+                    
+            self.render()
+        pygame.quit()
+
     def reset_pos(self, piece):
         if piece.type == 1:
             piece.pos = (3, 3)
@@ -303,46 +476,6 @@ class TetrisEnv:
             ghost_pieces.append((row, col))
         
         return ghost_pieces
-
-    def step(self, action):
-        """
-        action: 0=left, 1=right, 2=rotatecw, 3=rotateacw, 4=soft down, 5=hard down, 6=hold piece
-        returns: state, reward, done, info
-        """
-        if action == 6:
-            self.hold_piece()
-            self.last_rotated = False
-        if action == 5:
-            self.hard_down()
-        if action == 4:
-            if self.get_lowest_row()[0] < 23 and self.get_lowest_row()[1] == False:
-                self.cur_piece.pos = (self.cur_piece.pos[0] + 1, self.cur_piece.pos[1])
-                self.cur_piece.pieces = [(r + 1, c) for r, c in self.cur_piece.pieces]
-                self.add_points(0, 1)
-                self.last_rotated = False
-        if action == 0:
-            if self.left_and_right()[0] > 0 and not(self.get_side_obstruct(-1)):
-                self.cur_piece.pos = (self.cur_piece.pos[0], self.cur_piece.pos[1] - 1)
-                self.cur_piece.pieces = [(r, c - 1) for r, c in self.cur_piece.pieces]
-                self.last_rotated = False
-
-                if self.lock:
-                    self.lock_moves += 1
-                    self.lock_timer = 0
-        if action == 1:
-            if self.left_and_right()[1] < 9 and not(self.get_side_obstruct(1)):
-                self.cur_piece.pos = (self.cur_piece.pos[0], self.cur_piece.pos[1] + 1)
-                self.cur_piece.pieces = [(r, c + 1) for r, c in self.cur_piece.pieces]
-                self.last_rotated = False
-                
-                if self.lock:
-                    self.lock_moves += 1
-                    self.lock_timer = 0
-        if action == 2:
-            self.rotate_cw()
-            
-        if action == 3:
-            self.rotate_acw()
     
     def hard_down(self):
         # Find the maximum distance we can drop the piece
@@ -453,136 +586,6 @@ class TetrisEnv:
             self.gravity = gravity[self.level - 1]
         else:
             self.gravity = 20
-
-    def run(self):
-        running = True
-
-        das_initial = 130
-        if self.auto_lock < das_initial:
-            self.auto_lock = das_initial
-        das_repeat = 17
-        left_held = False
-        left_happened = False
-        right_held = False
-        right_happened = False
-        left_timer = 0
-        right_timer = 0
-        down_held = False
-
-        while running:
-            dt = clock.tick(60)
-            
-            # Update gravity based on current level
-            self.get_gravity()
-            
-            # Increment gravity counter
-            self.gravity_counter += self.gravity
-            
-            
-
-            if self.lock_timer >= self.auto_lock or self.lock_moves >= 15:
-                offsets = PIECES[self.cur_piece.type][self.rot_index]
-                for row, col in self.cur_piece.pieces:
-                    self.board[row][col] = self.cur_piece.type
-                self.swapped = False
-                self.new_piece()
-            if self.lock:
-                self.lock_timer += dt
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_SPACE:
-                        self.step(5)
-                    if event.key == pygame.K_LEFT:
-                        self.step(0)
-
-                        left_held = True
-                        left_timer = 0
-                        left_happened = False
-
-                        # reset opposite side completely
-                        right_held = False
-                        right_happened = False
-                        right_timer = 0
-
-                    if event.key == pygame.K_RIGHT:
-                        self.step(1)
-
-                        right_held = True
-                        right_timer = 0
-                        right_happened = False
-
-                        # reset opposite side completely
-                        left_held = False
-                        left_happened = False
-                        left_timer = 0
-                    if event.key == pygame.K_UP:
-                        self.step(2)
-                    if event.key == pygame.K_DOWN:
-                        self.step(4)
-                        down_held = True
-                    if event.key == pygame.K_z:
-                        self.step(3)
-                    if event.key == pygame.K_c:
-                        self.step(6)
-                elif event.type == pygame.KEYUP:
-                    if event.key == pygame.K_LEFT:
-                        left_held = False
-                        left_happened = False
-                        left_timer = 0
-                    if event.key == pygame.K_RIGHT:
-                        right_held = False
-                        right_happened = False
-                        right_timer = 0
-                    if event.key == pygame.K_DOWN:
-                        down_held = False
-            
-            if left_held:
-                if left_happened:
-                    if left_timer > das_repeat:
-                        self.step(0)
-                        left_timer = 0
-                elif left_timer > das_initial:
-                    self.step(0)
-                    left_happened = True
-                    left_timer = 0
-                
-                left_timer += dt
-            
-            if right_held:
-                if right_happened:
-                    if right_timer > das_repeat:
-                        self.step(1)
-                        right_timer = 0
-                elif right_timer > das_initial:
-                    self.step(1)
-                    right_happened = True
-                    right_timer = 0
-                
-                right_timer += dt
-            if down_held:
-                self.step(4)
-
-            # Handle gravity-based falling
-            while self.gravity_counter >= 1:
-                self.gravity_counter -= 1
-                if self.get_lowest_row()[0] < 23 and self.get_lowest_row()[1] == False:
-                    self.cur_piece.pos = (self.cur_piece.pos[0] + 1, self.cur_piece.pos[1])
-                    self.cur_piece.pieces = [(r + 1, c) for r, c in self.cur_piece.pieces]
-
-                    self.last_rotated = False
-
-                    self.lock = False
-                    self.lock_timer = 0
-                    self.lock_moves = 0
-                else:
-                    self.lock = True
-                    self.gravity_counter = 0
-                    break
-                    
-            self.render()
-        pygame.quit()
 
     def render(self):
         screen.fill((40, 40, 40))
@@ -704,10 +707,6 @@ class TetrisEnv:
 
         pygame.display.flip()
         clock.tick(60)
-    
-    def get_state(self):
-        # return board + piece info as numpy array
-        pass
 
     def create_board(self):
         rows = 20 + 4       # +4 to top of grid to account for pieces which rotate at the top
