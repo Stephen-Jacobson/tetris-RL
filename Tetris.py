@@ -4,8 +4,9 @@ from typing import Optional
 import numpy as np
 import pygame
 import gymnasium as gym
+from gymnasium.envs.registration import register
 
-pygame.init()
+
 
 CELL_SIZE = 30      # size of each Tetris block in pixels
 ROWS, COLS = 20, 10 # visible board size
@@ -30,9 +31,6 @@ COLORS = {
     7: (255,165,0)
 }
 
-screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-pygame.display.set_caption("Tetris")
-clock = pygame.time.Clock()
 
 class TetrisEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 60}
@@ -51,22 +49,23 @@ class TetrisEnv(gym.Env):
                     shape = (24, 10),
                     dtype = np.int32
                 ),
-                "cur_piece_type": gym.spaces.Discrete(7),
+                "cur_piece_type": gym.spaces.Discrete(8),
                 "cur_piece_rot": gym.spaces.Discrete(4),
                 "cur_piece_pos": gym.spaces.Box(
                     low = np.array([0, 0], dtype = np.int32),
                     high = np.array([23, 9], dtype = np.int32),
                     dtype = np.int32
                 ),
-                "hold_piece": gym.spaces.Discrete(7),
-                "next_piece1": gym.spaces.Discrete(7),
-                "next_piece2": gym.spaces.Discrete(7),
-                "next_piece3": gym.spaces.Discrete(7)
+                "hold_piece": gym.spaces.Discrete(8),
+                "next_piece1": gym.spaces.Discrete(8),
+                "next_piece2": gym.spaces.Discrete(8),
+                "next_piece3": gym.spaces.Discrete(8)
             }
         )
 
         # Game Logic
         self.board = self.create_board()
+        self.reward = 0
         self.gravity = 1/60
         self.gravity_counter = 0
         self.auto_lock = 500
@@ -85,11 +84,16 @@ class TetrisEnv(gym.Env):
         self.combo = [0, False]             #stores amount in combo and whether can be b2b or not
         self.last_rotated = False
         self.update_next_pieces()
+        self.rl = False
+
+        self.screen = None
+        self.clock = None
     
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         
         self.board = self.create_board()
+        self.reward = 0
         self.gravity = 1/60
         self.gravity_counter = 0
         self.lock = False
@@ -111,15 +115,36 @@ class TetrisEnv(gym.Env):
         return self.get_state()
     
     def _get_obs(self):
+        # board must be exactly int32
+        board_obs = self.board.astype(np.int32).copy()
+
+        # cur_piece_type should be int (1..7)
+        cur_type = int(self.cur_piece.type) if self.cur_piece is not None else 0
+
+        # hold_piece: return 0 if None, else the piece type as int
+        if self.held_piece is None:
+            hold_val = 0
+        else:
+            # if held_piece is stored as an object
+            try:
+                hold_val = int(self.held_piece.type)
+            except Exception:
+                # fallback: if you ever store the type directly
+                hold_val = int(self.held_piece)
+
+        next1 = int(self.next_pieces[0]) if len(self.next_pieces) > 0 else 0
+        next2 = int(self.next_pieces[1]) if len(self.next_pieces) > 1 else 0
+        next3 = int(self.next_pieces[2]) if len(self.next_pieces) > 2 else 0
+
         return {
-            "board": self.board.copy(),             # 24x10 grid
-            "cur_piece_type": self.cur_piece.type,  
-            "cur_piece_rot": self.rot_index,
+            "board": board_obs,                             # np.int32 array
+            "cur_piece_type": cur_type,                     # int 0..7
+            "cur_piece_rot": int(self.rot_index),           # int
             "cur_piece_pos": np.array(self.cur_piece.pos, dtype=np.int32),
-            "hold_piece": self.held_piece,
-            "next_piece1": self.next_pieces[0],
-            "next_piece2": self.next_pieces[1],
-            "next_piece3": self.next_pieces[2]
+            "hold_piece": hold_val,                         # int 0..7
+            "next_piece1": next1,                           # int 0..7
+            "next_piece2": next2,
+            "next_piece3": next3
         }
 
     def _get_info(self):
@@ -141,21 +166,33 @@ class TetrisEnv(gym.Env):
         info = self._get_info()
         return observation, info
     
-    def step(self, action, dt = 1, apply_grivity = True):
+    def step(self, action, dt: float = 1000.0/60.0, apply_gravity: bool = True):
         """
         action: 0=left, 1=right, 2=rotatecw, 3=rotateacw, 4=soft down, 5=hard down, 6=hold piece, 7=do nothing
         returns: state, reward, done, info
         """
+        old_lines = self.clears
+        piece_steps = self.cur_piece.steps
+
+        if self.screen is not None:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    self.screen = None
+
         old_points = self.points
         done = False
         
+
         if action == 7:         #do nothing :)
             None
+        self.cur_piece.steps += 1
+
         if action == 6:
             self.hold_piece()
             self.last_rotated = False
         if action == 5:
-            self.hard_down()
+            done = self.hard_down()
         if action == 4:
             if self.get_lowest_row()[0] < 23 and self.get_lowest_row()[1] == False:
                 self.cur_piece.pos = (self.cur_piece.pos[0] + 1, self.cur_piece.pos[1])
@@ -186,9 +223,11 @@ class TetrisEnv(gym.Env):
         if action == 3:
             self.rotate_acw()
 
-        if apply_grivity:
+        frames_elapsed = dt / (1000.0 / 60.0)
+
+        if apply_gravity:
             self.get_gravity()
-            self.gravity_counter += self.gravity
+            self.gravity_counter += self.gravity * frames_elapsed
 
             # Handle gravity-based falling
             while self.gravity_counter >= 1:
@@ -208,24 +247,128 @@ class TetrisEnv(gym.Env):
                     break
             
             if self.lock:
-                self.lock_timer += 1
+                self.lock_timer += dt * 1
 
             if self.lock_timer >= self.auto_lock or self.lock_moves >= 15:
-                    offsets = PIECES[self.cur_piece.type][self.rot_index]
-                    for row, col in self.cur_piece.pieces:
-                        self.board[row][col] = self.cur_piece.type
-                    self.swapped = False
-                    done = self.new_piece()
-            
+                offsets = PIECES[self.cur_piece.type][self.rot_index]
+                for row, col in self.cur_piece.pieces:
+                    self.board[row][col] = self.cur_piece.type
+                self.swapped = False
+                
+                temp = self.new_piece()
+                if not done:
+                    done = temp
+
             observation = self._get_obs()
             info = self._get_info()
 
             # Calculate reward as the change in points
-            reward = self.points - old_points
+            cleared = self.clears - old_lines
 
-            return observation, reward, done, False, info
+            point_delta = self.points - old_points
+
+            bumpiness = self.get_bumpiness()
+            holes = self.get_holes()
+            agg_height = self.get_aggregate_height()
+
+            # ---- hyperparameters (tune these!) ----
+            w_points = 2.0            # keep original point signal
+            w_lines = 10.0             # extra positive reward per cleared line (on top of points)
+            w_holes = 0.8             # penalty per hole (higher -> avoid holes)
+            w_bumpiness = 2       # penalty per bumpiness unit (lower -> flatter)
+            w_height = 0.01          # penalty per aggregate height unit (lower -> lower stack)
+            per_action_penalty = 0.02 # small penalty for each action on the same piece
+            action_threshold = 10     # allow a few actions without big penalty
+
+            extra_action_penalty = 0.05
+            extra_actions = max(0, piece_steps - action_threshold)
+
+            # ---- Calculate shaped reward ----
+            reward = 0.0
+            reward += w_points * point_delta
+            
+            reward += w_lines * self.clears
+            
+            reward -= w_holes * holes
+            
+            reward -= w_bumpiness * bumpiness
+            
+            reward -= w_height * agg_height
+            
+            # per-action small penalty (encourages fewer, more decisive moves)
+            if 3<=piece_steps<= 10:
+                reward += per_action_penalty * 10 * piece_steps
+            else:
+                if piece_steps > 15:
+                    reward -= per_action_penalty * 5 * piece_steps
+                else:
+                    reward -= per_action_penalty * piece_steps
+
+            
+            # extra penalty if the piece used way too many moves
+            reward -= extra_action_penalty * extra_actions
+            if self.screen is not None:
+                print(f"score: {w_points * point_delta}")
+                print(f"clears: {w_lines * self.clears}")
+                print(f"holes: -{w_holes * holes}")
+                print(f"bumps: -{w_bumpiness * bumpiness}")
+                print(f"agg height: -{w_height * agg_height}")
+                print(f"action penalty: -{per_action_penalty * piece_steps}")
+                print(f"extra action: -{extra_action_penalty * extra_actions}")
+            #     print(self.reward)
+            # self.reward += reward
+
+            # # Get current board metrics
+            # holes = self.get_holes()
+            # bumpiness = self.get_bumpiness()
+            # agg_height = self.get_aggregate_height()
+            
+            # # ---- Reward hyperparameters ----
+            # w_line_clear_base = 100.0     # Base reward per line
+            # w_holes = -4.0                # Penalty per hole
+            # w_bumpiness = -0.5            # Penalty per bumpiness unit
+            # w_height = -0.5               # Penalty for stack height
+            # w_game_over = -100.0          # Large penalty for dying
+            # w_survival = 0.1              # Small reward for surviving
+            # w_max_steps = 30
+            
+            # # ---- Calculate reward ----
+            # reward = 0.0
+            
+            # # Line clear rewards (exponential to encourage multi-line clears)
+            # if cleared == 1:
+            #     reward += w_line_clear_base * 1  # 100
+            # elif cleared == 2:
+            #     reward += w_line_clear_base * 3  # 300
+            # elif cleared == 3:
+            #     reward += w_line_clear_base * 5  # 500
+            # elif cleared == 4:
+            #     reward += w_line_clear_base * 8  # 800 (Tetris!)
+            
+            # if self.cur_piece.steps > w_max_steps:
+            #     reward -= (self.cur_piece.steps - w_max_steps) * 0.6
+
+            # # Board state penalties (only apply when piece locks)
+            # if self.lock_timer >= self.auto_lock or self.lock_moves >= 15 or action == 5:
+            #     reward += w_holes * holes
+            #     reward += w_bumpiness * bumpiness
+            #     reward += w_height * (agg_height / 100.0)  # Normalize height
+            w_survival = 0.1
+            w_game_over = -100.0
+            # Survival bonus (encourages staying alive)
+            reward += w_survival
+            
+
+            if done:
+                reward += w_game_over
+                self.reset()
+            return observation, reward, bool(done), False, info
     
     def run(self):
+        pygame.init()
+        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        self.clock = pygame.time.Clock()
+
         running = True
 
         das_initial = 130
@@ -241,7 +384,7 @@ class TetrisEnv(gym.Env):
         down_held = False
 
         while running:
-            dt = clock.tick(60)
+            dt = self.clock.tick(60)
             
             # Update gravity based on current level
             self.get_gravity()
@@ -402,6 +545,7 @@ class TetrisEnv(gym.Env):
         if self.swapped:
             return
         self.swapped = True
+        self.cur_piece.steps = 0
         if self.held_piece == None:
             self.held_piece = self.cur_piece
             self.new_piece()
@@ -435,6 +579,8 @@ class TetrisEnv(gym.Env):
             if self.board[i[0] + 1][i[1]] != 0 and not((i[0] + 1, i[1]) in self.cur_piece.pieces):
                 piece_obstruct = True
         return lowest, piece_obstruct
+    
+    
     
     def get_side_obstruct(self, dir):
         #dir = 1 right, -1 left
@@ -613,7 +759,11 @@ class TetrisEnv(gym.Env):
             col = self.cur_piece.pos[1] + offset[1]
             self.board[row][col] = self.cur_piece.type
         self.swapped = False
-        self.new_piece()
+        if self.new_piece():
+            return True
+        else:
+            return False
+            
 
     def check_end(self):
         dont_end = False
@@ -630,12 +780,52 @@ class TetrisEnv(gym.Env):
         if game_over:
             return True
         self.check_clear()
-        self.cur_piece = self.spawn_piece()
+        temp = self.spawn_piece()
+        if temp == None:
+            return True
+        self.cur_piece = temp
         self.lock = False
         self.lock_timer = 0
         self.lock_moves = 0
         self.rot_index = 0
         return False
+    
+    def get_bumpiness(self):
+        """Calculate the bumpiness of the board (sum of absolute height differences between adjacent columns)"""
+        heights = self.get_column_heights()
+        bumpiness = 0
+        for i in range(len(heights) - 1):
+            bumpiness += abs(heights[i] - heights[i + 1])
+        return bumpiness
+
+    def get_column_heights(self):
+        """Get the height of each column (distance from bottom to highest filled cell)"""
+        heights = []
+        for col in range(COLS):
+            height = 0
+            for row in range(len(self.board) - 1, -1, -1):  # Start from bottom
+                if self.board[row][col] != 0:
+                    height = len(self.board) - row
+            heights.append(height)
+        return heights
+    
+    def get_aggregate_height(self):
+        """Calculate the sum of all column heights"""
+        heights = self.get_column_heights()
+        return sum(heights)
+
+    def get_holes(self):
+        """Calculate the number of holes (empty cells with a filled cell directly above them)"""
+        holes = 0
+        for col in range(COLS):
+            block_found = False
+            for row in range(len(self.board)):
+                cell = self.board[row][col]
+                if cell != 0:
+                    block_found = True
+                elif block_found and cell == 0:
+                    holes += 1
+        return holes
 
     def wall_kicks(self, dir):           #use when rotating, direction: 0 clockwise, 1 anticlockwise
         num_kick = 0
@@ -697,25 +887,33 @@ class TetrisEnv(gym.Env):
             self.gravity = 20
 
     def render(self):
-        screen.fill((40, 40, 40))
+        if self.screen is None:
+            self.rl = True
+            pygame.init()
+            self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+            self.clock = pygame.time.Clock()
+        
+        pygame.display.set_caption("Tetris")
+
+        self.screen.fill((40, 40, 40))
         
         # Draw stats panel on the left
-        pygame.draw.rect(screen, (40, 40, 40), pygame.Rect(0, 0, STATS_PANEL_WIDTH, WINDOW_HEIGHT))
+        pygame.draw.rect(self.screen, (40, 40, 40), pygame.Rect(0, 0, STATS_PANEL_WIDTH, WINDOW_HEIGHT))
         
         # Draw right panel for next pieces
         right_panel_x = STATS_PANEL_WIDTH + COLS * CELL_SIZE
-        pygame.draw.rect(screen, (40, 40, 40), pygame.Rect(right_panel_x, 0, STATS_PANEL_WIDTH, WINDOW_HEIGHT))
+        pygame.draw.rect(self.screen, (40, 40, 40), pygame.Rect(right_panel_x, 0, STATS_PANEL_WIDTH, WINDOW_HEIGHT))
         
         font = pygame.font.Font(None, 36)
         small_font = pygame.font.Font(None, 48)
         
         # Draw HOLD section
         hold_label = font.render("HOLD", True, (255, 255, 255))
-        screen.blit(hold_label, (20, 480))
+        self.screen.blit(hold_label, (20, 480))
         
         # Draw hold piece box
         hold_box_y = 520
-        pygame.draw.rect(screen, (60, 60, 60), pygame.Rect(20, hold_box_y, 110, 110), 2)
+        pygame.draw.rect(self.screen, (60, 60, 60), pygame.Rect(20, hold_box_y, 110, 110), 2)
         
         if self.held_piece is not None:
             offsets = PIECES[self.held_piece.type][0]  # Always show rotation 0
@@ -725,19 +923,19 @@ class TetrisEnv(gym.Env):
             center_y = hold_box_y + 55
             for r, c in offsets:
                 pygame.draw.rect(
-                    screen,
+                    self.screen,
                     color,
                     pygame.Rect(center_x + c*20 - 20, center_y + r*20 - 20, 18, 18)
                 )
         
         # Draw NEXT section
         next_label = font.render("NEXT", True, (255, 255, 255))
-        screen.blit(next_label, (right_panel_x + 20, 50))
+        self.screen.blit(next_label, (right_panel_x + 20, 50))
         
         # Draw next 3 pieces
         for i, piece_type in enumerate(self.next_pieces):
             box_y = 100 + i * 130
-            pygame.draw.rect(screen, (60, 60, 60), pygame.Rect(right_panel_x + 20, box_y, 110, 110), 2)
+            pygame.draw.rect(self.screen, (60, 60, 60), pygame.Rect(right_panel_x + 20, box_y, 110, 110), 2)
             
             offsets = PIECES[piece_type][0]
             color = COLORS[piece_type]
@@ -745,7 +943,7 @@ class TetrisEnv(gym.Env):
             center_y = box_y + 55
             for r, c in offsets:
                 pygame.draw.rect(
-                    screen,
+                    self.screen,
                     color,
                     pygame.Rect(center_x + c*20 - 20, center_y + r*20 - 20, 18, 18)
                 )
@@ -753,20 +951,20 @@ class TetrisEnv(gym.Env):
         # Draw "SCORE" label and value
         score_label = font.render("SCORE", True, (255, 255, 255))
         score_value = small_font.render(str(self.points), True, (255, 255, 255))
-        screen.blit(score_label, (20, 50))
-        screen.blit(score_value, (20, 90))
+        self.screen.blit(score_label, (20, 50))
+        self.screen.blit(score_value, (20, 90))
         
         # Draw "LEVEL" label and value
         level_label = font.render("LEVEL", True, (255, 255, 255))
         level_value = small_font.render(str(self.level), True, (255, 255, 255))
-        screen.blit(level_label, (20, 200))
-        screen.blit(level_value, (20, 240))
+        self.screen.blit(level_label, (20, 200))
+        self.screen.blit(level_value, (20, 240))
         
         # Draw "LINES" label and value
         lines_label = font.render("LINES", True, (255, 255, 255))
         lines_value = small_font.render(str(self.clears), True, (255, 255, 255))
-        screen.blit(lines_label, (20, 350))
-        screen.blit(lines_value, (20, 390))
+        self.screen.blit(lines_label, (20, 350))
+        self.screen.blit(lines_value, (20, 390))
         
         # Draw board (offset by STATS_PANEL_WIDTH)
         for r in range(HIDDEN_ROWS, HIDDEN_ROWS + ROWS):
@@ -774,12 +972,12 @@ class TetrisEnv(gym.Env):
                 value = self.board[r][c]
                 color = COLORS[value] if value in COLORS else (128,128,128)
                 pygame.draw.rect(
-                    screen,
+                    self.screen,
                     color,
                     pygame.Rect(STATS_PANEL_WIDTH + c*CELL_SIZE, (r-HIDDEN_ROWS)*CELL_SIZE + 25, CELL_SIZE, CELL_SIZE)
                 )
                 pygame.draw.rect(
-                    screen,
+                    self.screen,
                     (50,50,50),
                     pygame.Rect(STATS_PANEL_WIDTH + c*CELL_SIZE, (r-HIDDEN_ROWS)*CELL_SIZE + 25, CELL_SIZE, CELL_SIZE),
                     1
@@ -791,7 +989,7 @@ class TetrisEnv(gym.Env):
             if r >= HIDDEN_ROWS:
                 color = COLORS[self.cur_piece.type]
                 pygame.draw.rect(
-                    screen,
+                    self.screen,
                     (color[0]//3, color[1]//3, color[2]//3),
                     pygame.Rect(STATS_PANEL_WIDTH + c*CELL_SIZE, (r-HIDDEN_ROWS)*CELL_SIZE + 25, CELL_SIZE, CELL_SIZE),
                     2
@@ -803,24 +1001,24 @@ class TetrisEnv(gym.Env):
                 if r >= HIDDEN_ROWS:
                     color = COLORS[self.cur_piece.type]
                     pygame.draw.rect(
-                        screen,
+                        self.screen,
                         color,
                         pygame.Rect(STATS_PANEL_WIDTH + c*CELL_SIZE, (r-HIDDEN_ROWS)*CELL_SIZE + 25, CELL_SIZE, CELL_SIZE)
                     )
                     pygame.draw.rect(
-                        screen,
+                        self.screen,
                         (50,50,50),
                         pygame.Rect(STATS_PANEL_WIDTH + c*CELL_SIZE, (r-HIDDEN_ROWS)*CELL_SIZE + 25, CELL_SIZE, CELL_SIZE),
                         1
                     )
 
         pygame.display.flip()
-        clock.tick(60)
+        self.clock.tick(60)
 
     def create_board(self):
         rows = 20 + 4       # +4 to top of grid to account for pieces which rotate at the top
         cols = 10
-        board = np.zeros((rows, cols), dtype = int)
+        board = np.zeros((rows, cols), dtype=np.int32)
         return board
     
     def shuffle(self):
@@ -853,7 +1051,10 @@ class TetrisEnv(gym.Env):
 
         for i in cur_piece.pieces:
             if self.board[i[0]][i[1]] != 0:
-                self.reset()
+                if not(self.rl):
+                    self.reset()
+                else:
+                    return None
 
         return cur_piece
 
@@ -863,6 +1064,12 @@ class TetrisEnv(gym.Env):
     def rotate_acw(self):
         self.wall_kicks(1)
     
+register(
+    id='Tetris-v0',
+    entry_point='Tetris:TetrisEnv',
+    max_episode_steps=10000,
+)
+
 if __name__ == "__main__":
     env = TetrisEnv()  # create environment
     env.run()          # start main loop

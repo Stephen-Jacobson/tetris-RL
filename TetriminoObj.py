@@ -3,6 +3,7 @@ class TetriminoObj:
         self.pos = pos
         self.pieces = pieces
         self.type = type
+        self.steps = 0
 
     # def set_space(self, space):
     #     self.space = space
