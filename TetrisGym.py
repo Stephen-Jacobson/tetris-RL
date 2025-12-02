@@ -3,6 +3,8 @@ from TetriminoObj import TetriminoObj
 from typing import Optional
 import numpy as np
 import pygame
+import gymnasium as gym
+from gymnasium.envs.registration import register
 
 CELL_SIZE = 30      # size of each Tetris block in pixels
 ROWS, COLS = 20, 10 # visible board size
@@ -28,9 +30,37 @@ COLORS = {
 }
 
 
-class TetrisEnv():
+class TetrisEnv(gym.Env):
+    metadata = {"render_modes": ["human"], "render_fps": 60}
 
     def __init__(self):
+        super().__init__()
+
+        # Gym Spaces
+        self.action_space = gym.spaces.Discrete(8)
+
+        self.observation_space = gym.spaces.Dict(
+            {
+                "board": gym.spaces.Box(
+                    low = 0,
+                    high = 7,
+                    shape = (24, 10),
+                    dtype = np.int32
+                ),
+                "cur_piece_type": gym.spaces.Discrete(8),
+                "cur_piece_rot": gym.spaces.Discrete(4),
+                "cur_piece_pos": gym.spaces.Box(
+                    low = np.array([0, 0], dtype = np.int32),
+                    high = np.array([23, 9], dtype = np.int32),
+                    dtype = np.int32
+                ),
+                "hold_piece": gym.spaces.Discrete(8),
+                "next_piece1": gym.spaces.Discrete(8),
+                "next_piece2": gym.spaces.Discrete(8),
+                "next_piece3": gym.spaces.Discrete(8)
+            }
+        )
+
         # Game Logic
         self.board = self.create_board()
         self.reward = 0
@@ -57,7 +87,9 @@ class TetrisEnv():
         self.screen = None
         self.clock = None
     
-    def reset(self):
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
+        super().reset(seed=seed)
+        
         self.board = self.create_board()
         self.reward = 0
         self.gravity = 1/60
@@ -192,7 +224,6 @@ class TetrisEnv():
         frames_elapsed = dt / (1000.0 / 60.0)
         
         if apply_gravity:
-            temp = [False, -1]
             self.get_gravity()
             self.gravity_counter += self.gravity * frames_elapsed
 
@@ -224,118 +255,111 @@ class TetrisEnv():
                 
                 temp = self.new_piece()
                 if not done:
-                    done = temp[0]
+                    done = temp
 
             observation = self._get_obs()
             info = self._get_info()
 
             # Calculate reward as the change in points
-            
-            # # ---- hyperparameters (tune these!) ----
-            # w_points = 2.0            # keep original point signal
-            # w_lines = 10.0             # extra positive reward per cleared line (on top of points)
-            # w_holes = 0.8             # penalty per hole (higher -> avoid holes)
-            # w_bumpiness = 2       # penalty per bumpiness unit (lower -> flatter)
-            # w_height = 0.01          # penalty per aggregate height unit (lower -> lower stack)
-            # per_action_penalty = 0.02 # small penalty for each action on the same piece
-            # action_threshold = 10     # allow a few actions without big penalty
-
-            # extra_action_penalty = 0.05
-            # extra_actions = max(0, piece_steps - action_threshold)
-
-            # # ---- Calculate shaped reward ----
-            # reward = 0.0
-            # reward += w_points * point_delta
-            
-            # reward += w_lines * self.clears
-            
-            # reward -= w_holes * holes
-            
-            # reward -= w_bumpiness * bumpiness
-            
-            # reward -= w_height * agg_height
-            
-            # # per-action small penalty (encourages fewer, more decisive moves)
-            # if 3<=piece_steps<= 10:
-            #     reward += per_action_penalty * 10 * piece_steps
-            # else:
-            #     if piece_steps > 15:
-            #         reward -= per_action_penalty * 5 * piece_steps
-            #     else:
-            #         reward -= per_action_penalty * piece_steps
-
-            
-            # # extra penalty if the piece used way too many moves
-            # reward -= extra_action_penalty * extra_actions
-            # if self.screen is not None:
-            #     print(f"score: {w_points * point_delta}")
-            #     print(f"clears: {w_lines * self.clears}")
-            #     print(f"holes: -{w_holes * holes}")
-            #     print(f"bumps: -{w_bumpiness * bumpiness}")
-            #     print(f"agg height: -{w_height * agg_height}")
-            #     print(f"action penalty: -{per_action_penalty * piece_steps}")
-            #     print(f"extra action: -{extra_action_penalty * extra_actions}")
-            # #     print(self.reward)
-            # # self.reward += reward
-
-            # # # Get current board metrics
-            # # holes = self.get_holes()
-            # # bumpiness = self.get_bumpiness()
-            # # agg_height = self.get_aggregate_height()
-            
-            # # # ---- Reward hyperparameters ----
-            # # w_line_clear_base = 100.0     # Base reward per line
-            # # w_holes = -4.0                # Penalty per hole
-            # # w_bumpiness = -0.5            # Penalty per bumpiness unit
-            # # w_height = -0.5               # Penalty for stack height
-            # # w_game_over = -100.0          # Large penalty for dying
-            # # w_survival = 0.1              # Small reward for surviving
-            # # w_max_steps = 30
-            
-            # # # ---- Calculate reward ----
-            # # reward = 0.0
-            
-            # # # Line clear rewards (exponential to encourage multi-line clears)
-            # # if cleared == 1:
-            # #     reward += w_line_clear_base * 1  # 100
-            # # elif cleared == 2:
-            # #     reward += w_line_clear_base * 3  # 300
-            # # elif cleared == 3:
-            # #     reward += w_line_clear_base * 5  # 500
-            # # elif cleared == 4:
-            # #     reward += w_line_clear_base * 8  # 800 (Tetris!)
-            
-            # # if self.cur_piece.steps > w_max_steps:
-            # #     reward -= (self.cur_piece.steps - w_max_steps) * 0.6
-
-            # # # Board state penalties (only apply when piece locks)
-            # # if self.lock_timer >= self.auto_lock or self.lock_moves >= 15 or action == 5:
-            # #     reward += w_holes * holes
-            # #     reward += w_bumpiness * bumpiness
-            # #     reward += w_height * (agg_height / 100.0)  # Normalize height
-            # w_survival = 0.1
-            # w_game_over = -100.0
-            # # Survival bonus (encourages staying alive)
-            # reward += w_survival
-            reward = 0
-
-            game_over = -50
             cleared = self.clears - old_lines
-            if temp[1] == -1 or temp[1] == 0:
-                point_delta = cleared
-            elif temp[1] == 1:
-                point_delta = cleared * 2
+
+            point_delta = self.points - old_points
 
             bumpiness = self.get_bumpiness()
             holes = self.get_holes()
             agg_height = self.get_aggregate_height()
 
+            # ---- hyperparameters (tune these!) ----
+            w_points = 2.0            # keep original point signal
+            w_lines = 10.0             # extra positive reward per cleared line (on top of points)
+            w_holes = 0.8             # penalty per hole (higher -> avoid holes)
+            w_bumpiness = 2       # penalty per bumpiness unit (lower -> flatter)
+            w_height = 0.01          # penalty per aggregate height unit (lower -> lower stack)
+            per_action_penalty = 0.02 # small penalty for each action on the same piece
+            action_threshold = 10     # allow a few actions without big penalty
 
+            extra_action_penalty = 0.05
+            extra_actions = max(0, piece_steps - action_threshold)
+
+            # ---- Calculate shaped reward ----
+            reward = 0.0
+            reward += w_points * point_delta
+            
+            reward += w_lines * self.clears
+            
+            reward -= w_holes * holes
+            
+            reward -= w_bumpiness * bumpiness
+            
+            reward -= w_height * agg_height
+            
+            # per-action small penalty (encourages fewer, more decisive moves)
+            if 3<=piece_steps<= 10:
+                reward += per_action_penalty * 10 * piece_steps
+            else:
+                if piece_steps > 15:
+                    reward -= per_action_penalty * 5 * piece_steps
+                else:
+                    reward -= per_action_penalty * piece_steps
+
+            
+            # extra penalty if the piece used way too many moves
+            reward -= extra_action_penalty * extra_actions
+            if self.screen is not None:
+                print(f"score: {w_points * point_delta}")
+                print(f"clears: {w_lines * self.clears}")
+                print(f"holes: -{w_holes * holes}")
+                print(f"bumps: -{w_bumpiness * bumpiness}")
+                print(f"agg height: -{w_height * agg_height}")
+                print(f"action penalty: -{per_action_penalty * piece_steps}")
+                print(f"extra action: -{extra_action_penalty * extra_actions}")
+            #     print(self.reward)
+            # self.reward += reward
+
+            # # Get current board metrics
+            # holes = self.get_holes()
+            # bumpiness = self.get_bumpiness()
+            # agg_height = self.get_aggregate_height()
+            
+            # # ---- Reward hyperparameters ----
+            # w_line_clear_base = 100.0     # Base reward per line
+            # w_holes = -4.0                # Penalty per hole
+            # w_bumpiness = -0.5            # Penalty per bumpiness unit
+            # w_height = -0.5               # Penalty for stack height
+            # w_game_over = -100.0          # Large penalty for dying
+            # w_survival = 0.1              # Small reward for surviving
+            # w_max_steps = 30
+            
+            # # ---- Calculate reward ----
+            # reward = 0.0
+            
+            # # Line clear rewards (exponential to encourage multi-line clears)
+            # if cleared == 1:
+            #     reward += w_line_clear_base * 1  # 100
+            # elif cleared == 2:
+            #     reward += w_line_clear_base * 3  # 300
+            # elif cleared == 3:
+            #     reward += w_line_clear_base * 5  # 500
+            # elif cleared == 4:
+            #     reward += w_line_clear_base * 8  # 800 (Tetris!)
+            
+            # if self.cur_piece.steps > w_max_steps:
+            #     reward -= (self.cur_piece.steps - w_max_steps) * 0.6
+
+            # # Board state penalties (only apply when piece locks)
+            # if self.lock_timer >= self.auto_lock or self.lock_moves >= 15 or action == 5:
+            #     reward += w_holes * holes
+            #     reward += w_bumpiness * bumpiness
+            #     reward += w_height * (agg_height / 100.0)  # Normalize height
+            w_survival = 0.1
+            w_game_over = -100.0
+            # Survival bonus (encourages staying alive)
+            reward += w_survival
+            
 
             if done:
-                reward += game_over
+                reward += w_game_over
                 self.reset()
-
             return observation, reward, bool(done), False, info
     
     def run(self):
@@ -358,6 +382,7 @@ class TetrisEnv():
         down_held = False
 
         while running:
+            print(self.tslot_exists())
             dt = self.clock.tick(60)
             
             # Update gravity based on current level
@@ -665,7 +690,6 @@ class TetrisEnv():
                 self.add_points(12, 0)
         if cleared == 4:
             self.add_points(5, 0)
-        return type_clear
         
     def get_ghost_position(self):
         """Calculate where the ghost piece (hard drop preview) should be"""
@@ -980,17 +1004,17 @@ class TetrisEnv():
     def new_piece(self):
         game_over = self.check_end()
         if game_over:
-            return True, -1
-        type_clear = self.check_clear()
+            return True
+        self.check_clear()
         temp = self.spawn_piece()
         if temp == None:
-            return True, type_clear
+            return True
         self.cur_piece = temp
         self.lock = False
         self.lock_timer = 0
         self.lock_moves = 0
         self.rot_index = 0
-        return False, type_clear
+        return False
     
     def get_bumpiness(self):
         """Calculate the bumpiness of the board (sum of absolute height differences between adjacent columns)"""
@@ -1265,6 +1289,12 @@ class TetrisEnv():
 
     def rotate_acw(self):
         self.wall_kicks(1)
+    
+register(
+    id='Tetris-v0',
+    entry_point='Tetris:TetrisEnv',
+    max_episode_steps=10000,
+)
 
 if __name__ == "__main__":
     env = TetrisEnv()  # create environment
