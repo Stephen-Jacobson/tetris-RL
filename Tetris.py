@@ -2,7 +2,8 @@ from rotations import PIECES, WALL_KICKS, WALL_KICKS_I
 from TetriminoObj import TetriminoObj
 from typing import Optional
 import numpy as np
-import pygame
+import gymnasium as gym
+from gymnasium.envs.registration import register
 
 CELL_SIZE = 30      # size of each Tetris block in pixels
 ROWS, COLS = 20, 10 # visible board size
@@ -28,9 +29,36 @@ COLORS = {
 }
 
 
-class TetrisEnv():
+class TetrisEnv(gym.Env):
+    metadata = {"render_modes": ["human"], "render_fps": 60}
 
     def __init__(self):
+        super().__init__()
+
+        # Gym Spaces
+        self.action_space = gym.spaces.Discrete(8)
+
+        self.observation_space = gym.spaces.Dict(
+            {
+                "board": gym.spaces.Box(
+                    low = 0,
+                    high = 7,
+                    shape = (24, 10),
+                    dtype = np.int32
+                ),
+                "cur_piece_type": gym.spaces.Discrete(8),
+                "cur_piece_rot": gym.spaces.Discrete(4),
+                "cur_piece_pos": gym.spaces.Box(
+                    low = np.array([0, 0], dtype = np.int32),
+                    high = np.array([23, 9], dtype = np.int32),
+                    dtype = np.int32
+                ),
+                "hold_piece": gym.spaces.Discrete(8),
+                "next_piece1": gym.spaces.Discrete(8),
+                "next_piece2": gym.spaces.Discrete(8),
+                "next_piece3": gym.spaces.Discrete(8)
+            }
+        )
         # Game Logic
         self.board = self.create_board()
         self.reward = 0
@@ -57,7 +85,8 @@ class TetrisEnv():
         self.screen = None
         self.clock = None
     
-    def reset(self):
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
+        super().reset(seed=seed)
         self.board = self.create_board()
         self.reward = 0
         self.gravity = 1/60
@@ -139,8 +168,10 @@ class TetrisEnv():
         """
         old_lines = self.clears
         piece_steps = self.cur_piece.steps
+        placed = False
 
         if self.screen is not None:
+            import pygame
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
@@ -159,6 +190,7 @@ class TetrisEnv():
             self.last_rotated = False
         if action == 5:
             done = self.hard_down()
+            placed = True
         if action == 4:
             if self.get_lowest_row()[0] < 23 and self.get_lowest_row()[1] == False:
                 self.cur_piece.pos = (self.cur_piece.pos[0] + 1, self.cur_piece.pos[1])
@@ -221,7 +253,8 @@ class TetrisEnv():
                 for row, col in self.cur_piece.pieces:
                     self.board[row][col] = self.cur_piece.type
                 self.swapped = False
-                
+                placed = True
+
                 temp = self.new_piece()
                 if not done:
                     done = temp[0]
@@ -336,9 +369,10 @@ class TetrisEnv():
                 reward += game_over
                 self.reset()
 
-            return observation, reward, bool(done), False, info
+            return reward, done, placed
     
     def run(self):
+        import pygame
         pygame.init()
         self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         self.clock = pygame.time.Clock()
@@ -1089,6 +1123,7 @@ class TetrisEnv():
             self.gravity = 20
 
     def render(self):
+        import pygame
         if self.screen is None:
             self.rl = True
             pygame.init()
@@ -1265,6 +1300,12 @@ class TetrisEnv():
 
     def rotate_acw(self):
         self.wall_kicks(1)
+
+register(
+    id='Tetris-v1',
+    entry_point='Tetris:TetrisEnv',
+    max_episode_steps=10000,
+)
 
 if __name__ == "__main__":
     env = TetrisEnv()  # create environment
