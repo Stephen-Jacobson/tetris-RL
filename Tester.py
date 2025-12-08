@@ -3,135 +3,167 @@ import random
 import numpy as np
 from Tetris import TetrisEnv
 import heapq
-import os
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import pickle
+import os
 
-# Set environment variable to suppress pygame welcome message
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
-# Suppress TensorFlow warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # 0=all, 1=info, 2=warning, 3=error
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+def _worker_init():
+    import os, tensorflow as tf
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    try:
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+    except Exception:
+        pass
 
 def create_model(input_size, output_size, max_layers=3):
+    """FIXED: Use consistent activations instead of random"""
     model = tf.keras.models.Sequential()
     model.add(tf.keras.layers.Input(input_size))
     
-    num_layers = max_layers
     neurons = [64, 32, 32]
-    activation = ["relu", "sigmoid", "tanh"]
-    
-    for i in range(num_layers):
-        model.add(tf.keras.layers.Dense(neurons[i], activation=random.choice(activation)))
+    for i in range(max_layers):
+        model.add(tf.keras.layers.Dense(neurons[i], activation="relu"))
     
     model.add(tf.keras.layers.Dense(output_size, activation="linear"))
     return model
 
-def get_model_weights(model):
-    """Extract weights from model for serialization"""
-    weights = []
-    config = []
-    for layer in model.layers:
-        if hasattr(layer, 'units'):  # Dense layer
-            config.append({
-                'units': layer.units,
-                'activation': layer.activation.__name__ if hasattr(layer.activation, '__name__') else str(layer.activation)
-            })
-            weights.append(layer.get_weights())
-    return weights, config
-
-def build_model_from_weights(input_size, output_size, weights, config):
-    """Rebuild model from weights and config"""
-    model = tf.keras.models.Sequential()
-    model.add(tf.keras.layers.Input(input_size))
-    
-    for i, layer_config in enumerate(config[:-1]):  # Exclude output layer
-        model.add(tf.keras.layers.Dense(layer_config['units'], activation=layer_config['activation']))
-        if i < len(weights):
-            model.layers[i].set_weights(weights[i])
-    
-    # Output layer
-    model.add(tf.keras.layers.Dense(output_size, activation="linear"))
-    if len(config) <= len(weights):
-        model.layers[-1].set_weights(weights[-1])
-    
-    return model
-
-def play_game_worker(args):
-    """Worker function that can be pickled - receives weights instead of model"""
-    input_size, output_size, weights, config, render, max_steps = args
-    
-    # CRITICAL: Force CPU only in worker processes to avoid GPU memory issues
-    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-    import tensorflow as tf
-    tf.config.set_visible_devices([], 'GPU')
-    
-    # Rebuild model in this process
-    model = build_model_from_weights(input_size, output_size, weights, config)
-    
+def play_game(model, render=False, max_pieces=100):
+    """
+    COMPLETELY REWRITTEN - Tracks pieces placed, not steps
+    Rewards only given when pieces are placed - encourages efficiency!
+    """
     env = TetrisEnv()
-    clears = 0
+    env.reset()
+    
     total_reward = 0
-    not_done = True
-    steps = 0
+    pieces_placed = 0
+    actions_taken = 0
     
-    try:
-        while not_done and steps < max_steps:
-            state = []
-            
-            # Next pieces
-            for i in range(len(env.next_pieces)):
-                next_pieces_norm = ((env.next_pieces[i] / 7) * 2) - 1
-                state.append(next_pieces_norm)
-            
-            # Held piece
-            if env.held_piece == None:
-                held_piece = -1
-            else:
-                held_piece = ((env.held_piece.type / 7) * 2) - 1
-            
-            # Current piece
-            cur_piece = ((env.cur_piece.type / 7) * 2) - 1
-            
-            # Board features
-            bumpiness = ((env.get_bumpiness() / 216) * 2) - 1
-            holiness = ((env.get_holes() / 230) * 2) - 1
-            agg_height = ((env.get_aggregate_height() / 240) * 2) - 1
-            
-            # T-spin detection
-            t_spin = 1 if env.tslot_exists() else -1
-            
-            # Clears normalized
-            clears_norm = ((clears / 4) * 2) - 1
-            
-            state.extend([held_piece, cur_piece, bumpiness, holiness, agg_height, t_spin, clears_norm])
-            
-            # Get action from model
-            output = model(tf.convert_to_tensor([state], dtype=tf.float32), training=False)
-            action = tf.argmax(output[0]).numpy()
-            
-            # Take step
-            step_result = env.step(action)
-            steps += 1
-            
-            if render:
-                env.render()
-            
-            reward = step_result[1]
-            reward = reward - 0.2*bumpiness - 0.3*holiness - 0.2*agg_height
-            total_reward += reward
-            
-            clears = env.clears
-            not_done = not step_result[2]
+    # Normalization constants
+    MAX_BUMP = 216.0
+    MAX_HOLES = 230.0
+    MAX_AGG = 240.0
+    
+    if render:
+        env.render()
+    
+    # Run until max pieces placed (not max actions!)
+    while pieces_placed < max_pieces:
+        # Build state vector (10 features)
+        state = []
         
-        return total_reward
-    
-    except Exception as e:
-        print(f"Error in worker: {e}")
-        return -1000
+        # Next 3 pieces (normalized -1 to 1)
+        for i in range(len(env.next_pieces)):
+            state.append(((env.next_pieces[i] / 7.0) * 2.0) - 1.0)
+        
+        # Held piece (0 if None, else normalized)
+        if env.held_piece is None:
+            state.append(0.0)
+        else:
+            state.append(((env.held_piece.type / 7.0) * 2.0) - 1.0)
+        
+        # Current piece type
+        if env.cur_piece is not None:
+            state.append(((env.cur_piece.type / 7.0) * 2.0) - 1.0)
+        else:
+            state.append(0.0)
+        
+        # Board metrics (normalized -1 to 1)
+        bumpiness = (env.get_bumpiness() / MAX_BUMP) * 2.0 - 1.0
+        holes = (env.get_holes() / MAX_HOLES) * 2.0 - 1.0
+        agg_height = (env.get_aggregate_height() / MAX_AGG) * 2.0 - 1.0
+        
+        state.append(bumpiness)
+        state.append(holes)
+        state.append(agg_height)
+        
+        # T-slot exists (binary: -1 or 1)
+        state.append(1.0 if env.tslot_exists() else -1.0)
+        
+        # Lines cleared (normalized)
+        state.append(((env.clears / 10.0) * 2.0) - 1.0)
+        
+        # Ensure exactly 10 features
+        state = state[:10]
+        
+        # Get action from model
+        logits = model(tf.convert_to_tensor([state], dtype=tf.float32))
+        probs = tf.nn.softmax(logits[0]).numpy()
+        # numerical safety: if tiny negative numeric fixes, clip
+        probs = probs.clip(0, 1)
+        probs = probs / probs.sum()
+        action = int(np.random.choice(len(probs), p=probs))
 
-def mutate_model(model, mutation_rate=0.1, mutation_strength=0.2):
-    """Mutate model weights in place"""
+        # Step environment
+        reward, done, placed = env.step(action)
+        
+        actions_taken += 1
+        
+        if placed:
+            pieces_placed += 1
+            if render:
+                print(f"Piece #{pieces_placed} | Actions: {env.cur_piece.steps:2d} | Reward: {reward:7.1f} | Total: {total_reward:7.1f} | Lines: {env.clears}")
+        
+        total_reward += reward
+        
+        if render:
+            env.render()
+        
+        if done:
+            break
+        
+        # Safety: prevent infinite loops (max 50 actions per piece average)
+        if actions_taken > max_pieces * 50:
+            break
+    
+    # Cleanup
+    if env.screen is not None:
+        import pygame
+        if render:
+            pygame.time.delay(500)
+        pygame.quit()
+    
+    # Fitness based on reward and pieces placed
+    # More pieces = better survival
+    fitness = total_reward + (pieces_placed * 5.0)
+    
+    if render:
+        print(f"\n{'='*60}")
+        print(f"GAME SUMMARY")
+        print(f"{'='*60}")
+        print(f"Total Reward:      {total_reward:8.1f}")
+        print(f"Pieces Placed:     {pieces_placed:8d}")
+        print(f"Lines Cleared:     {env.clears:8d}")
+        print(f"Actions Taken:     {actions_taken:8d}")
+        print(f"Avg Actions/Piece: {actions_taken/max(1,pieces_placed):8.1f}")
+        print(f"Final Fitness:     {fitness:8.1f}")
+        print(f"{'='*60}\n")
+    
+    return fitness
+
+def crossover(parent_a, parent_b, input_size, output_size):
+    """Per-weight crossover between two parents"""
+    child = tf.keras.models.clone_model(parent_a)
+    child.build((None, input_size))
+    
+    wa = parent_a.get_weights()
+    wb = parent_b.get_weights()
+    new_weights = []
+    
+    for a, b in zip(wa, wb):
+        mask = np.random.rand(*a.shape) < 0.5
+        new_weights.append(np.where(mask, a, b))
+    
+    child.set_weights(new_weights)
+    return child
+
+def mutate_model(model, mutation_rate=0.15, mutation_strength=0.3):
+    """IMPROVED: More conservative mutation"""
     for layer in model.layers:
         weights = layer.get_weights()
         if len(weights) > 0:
@@ -144,157 +176,165 @@ def mutate_model(model, mutation_rate=0.1, mutation_strength=0.2):
             layer.set_weights(new_weights)
     return model
 
-def crossover_models(model_a, model_b, input_size, output_size):
-    """Create a child model by crossing over two parent models"""
-    child = tf.keras.models.Sequential()
-    child.add(tf.keras.layers.Input(input_size))
+def evaluate_model_wrapper(args):
+    """Wrapper for multiprocessing - NEVER render in workers"""
+    idx, weights_list = args
     
-    # Crossover hidden layers
-    for j in range(3):
-        source = model_a.layers[j] if random.randint(0, 1) == 0 else model_b.layers[j]
-        child.add(tf.keras.layers.Dense(source.units, activation=source.activation))
-        child.layers[j].set_weights(source.get_weights())
+    # Recreate model from weights
+    model = create_model(10, 8)
+    for i, layer_weights in enumerate(weights_list):
+        if len(layer_weights) > 0:
+            model.layers[i].set_weights(layer_weights)
     
-    # Output layer
-    child.add(tf.keras.layers.Dense(output_size, activation="linear"))
-    
-    return child
+    # Always render=False in workers
+    # max_pieces=100 means game ends after 100 pieces placed
+    fitness = play_game(model, render=False, max_pieces=100)
+    return idx, fitness
 
-def evolve_population(input_size, output_size, pop_size, generations, best_fit, num_workers=None):
-    """Evolve population using safe multiprocessing with weight serialization"""
+def evaluate_population_parallel(population, num_processes=None):
+    """Evaluate population in parallel (no rendering)"""
+    if num_processes is None:
+        num_processes = min(mp.cpu_count(), 8)
     
-    if num_workers is None:
-        num_workers = max(1, mp.cpu_count() - 1)  # Leave one core free
+    # Prepare arguments
+    eval_args = []
+    for idx, model in enumerate(population):
+        weights_list = [layer.get_weights() for layer in model.layers]
+        eval_args.append((idx, weights_list))
     
-    print(f"Using {num_workers} worker processes")
-    print(f"Initializing population of {pop_size} models...")
-    population = [create_model(input_size, output_size) for _ in range(pop_size)]
+    # Parallel evaluation
+    ctx = mp.get_context('spawn')
+    with ctx.Pool(processes=num_processes, initializer=_worker_init) as pool:
+        results = pool.map(evaluate_model_wrapper, eval_args)
     
-    for generation in range(generations):
-        print(f"\n{'='*50}")
-        print(f"Generation {generation + 1}/{generations}")
-        print(f"{'='*50}")
+    results.sort(key=lambda x: x[0])
+    fitness_scores = [fitness for _, fitness in results]
+    
+    return fitness_scores
+
+def render_best_model(model, max_pieces=200):
+    """Render best model in MAIN PROCESS ONLY"""
+    print("\n" + "="*50)
+    print("RENDERING BEST MODEL")
+    print("="*50)
+    fitness = play_game(model, render=True, max_pieces=max_pieces)
+    print(f"Final Fitness: {fitness:.2f}")
+    print("="*50 + "\n")
+    return fitness
+
+def evolve_population(input_size, output_size, pop_size, generations, best_fit, num_envs=None):
+    """
+    IMPROVED: Better selection, elitism, and rendering
+    """
+    population = []
+    
+    if num_envs is None:
+        num_envs = min(mp.cpu_count(), 8)
+    
+    # Initialize population
+    print("Initializing population...")
+    for i in range(pop_size):
+        population.append(create_model(input_size, output_size))
+    
+    best_fitness_ever = float('-inf')
+    best_model_ever = None
+    
+    for gen in range(generations):
+        print(f"\n{'='*60}")
+        print(f"GENERATION {gen + 1}/{generations}")
+        print(f"{'='*60}")
         
-        # Prepare tasks for parallel evaluation
-        should_render = ((generation + 1) % 10) == 0 and generation != 0
-        tasks = []
+        # Evaluate population in parallel
+        fitness_scores = evaluate_population_parallel(population, num_envs)
         
-        for i, model in enumerate(population):
-            render_this = should_render and i == 0
-            weights, config = get_model_weights(model)
-            tasks.append((input_size, output_size, weights, config, render_this, 2000))
-        
-        # Evaluate in parallel
-        fitness_scores = [0] * pop_size
-        
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            # Submit all tasks
-            future_to_idx = {executor.submit(play_game_worker, task): i 
-                           for i, task in enumerate(tasks)}
-            
-            # Collect results as they complete
-            completed = 0
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    fitness = future.result(timeout=60)  # 60 second timeout per game
-                    fitness_scores[idx] = fitness
-                except Exception as e:
-                    print(f"  Error evaluating model {idx}: {e}")
-                    fitness_scores[idx] = -1000
-                
-                completed += 1
-                if completed % 10 == 0:
-                    print(f"  Evaluated {completed}/{pop_size} models...")
-        
-        # Statistics
+        # Stats
         max_fitness = max(fitness_scores)
         avg_fitness = sum(fitness_scores) / len(fitness_scores)
         min_fitness = min(fitness_scores)
         
-        print(f"\nGeneration {generation + 1} Results:")
-        print(f"  Max fitness: {max_fitness:.2f}")
-        print(f"  Avg fitness: {avg_fitness:.2f}")
-        print(f"  Min fitness: {min_fitness:.2f}")
+        print(f"Max Fitness:  {max_fitness:8.2f}")
+        print(f"Avg Fitness:  {avg_fitness:8.2f}")
+        print(f"Min Fitness:  {min_fitness:8.2f}")
         
-        # Select best models
-        best_indices = heapq.nlargest(best_fit, range(len(fitness_scores)), 
-                                      key=lambda x: fitness_scores[x])
-        best_models = [population[i] for i in best_indices]
+        # Track best ever
+        if max_fitness > best_fitness_ever:
+            best_fitness_ever = max_fitness
+            best_idx = fitness_scores.index(max_fitness)
+            best_model_ever = tf.keras.models.clone_model(population[best_idx])
+            best_model_ever.set_weights(population[best_idx].get_weights())
+            print(f"*** NEW BEST FITNESS: {best_fitness_ever:.2f} ***")
         
-        # Create new population through crossover and mutation
+        # Render every 5 generations (in main process)
+        if (gen + 1) % 5 == 0:
+            best_idx = fitness_scores.index(max_fitness)
+            render_best_model(population[best_idx], max_pieces=200)
+        
+        # Selection - keep top performers
+        best_indices = heapq.nlargest(best_fit, enumerate(fitness_scores), key=lambda x: x[1])
+        best_models = [population[idx] for idx, _ in best_indices]
+        
+        # Create new population with elitism
+        elite_count = max(2, best_fit // 4)  # Keep top 25% of best
         new_population = []
         
-        num_children_per_iteration = best_fit // 2
-        iterations_needed = pop_size // num_children_per_iteration
+        # Add elites unchanged
+        for i in range(elite_count):
+            elite = tf.keras.models.clone_model(best_models[i])
+            elite.set_weights(best_models[i].get_weights())
+            new_population.append(elite)
         
-        for k in range(iterations_needed):
-            random.shuffle(best_models)
-            for i in range(0, best_fit - 1, 2):
-                child = crossover_models(best_models[i], best_models[i + 1], 
-                                        input_size, output_size)
-                mutate_model(child)
-                new_population.append(child)
-                
-                if len(new_population) >= pop_size:
-                    break
-            if len(new_population) >= pop_size:
-                break
+        # Fill rest with crossover + mutation
+        while len(new_population) < pop_size:
+            parent_a, parent_b = random.sample(best_models, 2)
+            child = crossover(parent_a, parent_b, input_size, output_size)
+            
+            # Adaptive mutation - stronger early, weaker later
+            mutation_strength = 0.4 * (1.0 - gen / generations) + 0.1
+            mutate_model(child, mutation_rate=0.15, mutation_strength=mutation_strength)
+            
+            new_population.append(child)
         
         population = new_population[:pop_size]
-        
-        # Save best model periodically
-        if (generation + 1) % 10 == 0:
-            best_idx = best_indices[0]
-            population[best_idx].save(f'checkpoint_gen_{generation + 1}.keras')
-            print(f"  Checkpoint saved: checkpoint_gen_{generation + 1}.keras")
     
     # Final evaluation
-    print("\nFinal evaluation...")
-    final_fitness = []
-    
-    tasks = []
-    for model in population:
-        weights, config = get_model_weights(model)
-        tasks.append((input_size, output_size, weights, config, False, 2000))
-    
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(play_game_worker, task) for task in tasks]
-        for future in as_completed(futures):
-            try:
-                fitness = future.result(timeout=60)
-                final_fitness.append(fitness)
-            except Exception as e:
-                print(f"Error in final evaluation: {e}")
-                final_fitness.append(-1000)
-    
+    print("\n" + "="*60)
+    print("FINAL EVALUATION")
+    print("="*60)
+    final_fitness = evaluate_population_parallel(population, num_envs)
     best_idx = final_fitness.index(max(final_fitness))
-    print(f"\nBest model fitness: {final_fitness[best_idx]:.2f}")
     
-    return population[best_idx]
+    # Compare with best ever
+    if max(final_fitness) > best_fitness_ever:
+        best_model_final = population[best_idx]
+    else:
+        best_model_final = best_model_ever
+        print(f"Using best model from generation (fitness: {best_fitness_ever:.2f})")
+    
+    # Render final best
+    print("\nRendering final best model...")
+    render_best_model(best_model_final, max_pieces=300)
+    
+    return best_model_final
 
 if __name__ == "__main__":
-    # CRITICAL: Set start method for Windows
-    mp.set_start_method('spawn', force=True)
-    
-    print("Starting genetic algorithm training with multiprocessing...")
-    
-    # Determine number of workers
-    num_cores = mp.cpu_count()
-    # Use fewer workers to be safe - each process needs memory
-    num_workers = max(8, max(1, num_cores // 2))  # Cap at 8 workers, use half cores
-    print(f"Detected {num_cores} CPU cores, using {num_workers} workers")
-    print("Workers will use CPU only (GPU disabled in worker processes)")
+    print("="*60)
+    print("TETRIS GENETIC ALGORITHM TRAINING")
+    print("="*60)
+    print(f"Population Size: 100")
+    print(f"Generations: 100")
+    print(f"Best Fit: 20")
+    print(f"Workers: 16")
+    print("="*60 + "\n")
     
     best_model = evolve_population(
         input_size=10,
         output_size=8,
-        pop_size=30,       # Reduced population for stability
+        pop_size=100,
         generations=100,
-        best_fit=10,
-        num_workers=num_workers
+        best_fit=20,
+        num_envs=16
     )
     
     # Save the best model
     best_model.save('best_tetris_model.keras')
-    print("\nTraining complete! Best model saved to 'best_tetris_model.keras'")
+    print("\n✓ Training complete! Best model saved to 'best_tetris_model.keras'")
