@@ -14,7 +14,7 @@ def create_model(input_size, output_size, max_layers = 3):
 
     num_layers = max_layers
 
-    neurons = [32, 32, 32]
+    neurons = [8, 4, 4]
     activation = ["tanh"]
     for i in range(num_layers):
         model.add(tf.keras.layers.Dense(neurons[i], activation = random.choice(activation)))
@@ -35,6 +35,7 @@ def play_game(model, render=False):
         best_move = []
         best_score = None
         for i in range(len(all_moves)):
+            print(i)
             state = env.simulate_conditions(all_moves[i])
             state = np.array(state, dtype=np.float32).reshape(1, -1)
             output = model(state)[0][0]
@@ -86,7 +87,8 @@ def evolve_model(input_size, output_size, pop_size, generations, best_fit):
         scores = []
         for j in range(pop_size):
             print(f"Pop: {j}")
-            scores.append([j, population[j], play_game(population[j])[0]])
+            scores.append([j, population[j], play_game(population[j], True)[0]])
+            print(scores[j][2])
         
         best_scores = sorted(scores, key=lambda x: x[2], reverse=True)[:best_fit]
         play_game(best_scores[0][1], True)
@@ -122,7 +124,7 @@ def evolve_model(input_size, output_size, pop_size, generations, best_fit):
 
 
 if __name__ == "__main__":
-    best_model = evolve_model(4, 1, 20, 50, 4)
+    best_model = evolve_model(9, 1, 20, 50, 4)
 
     best_model.save("best_tetris_model.keras")  
 

@@ -5,6 +5,7 @@ import numpy as np
 from collections import deque
 import gymnasium as gym
 from gymnasium.envs.registration import register
+import copy
 
 CELL_SIZE = 30      # size of each Tetris block in pixels
 ROWS, COLS = 20, 10 # visible board size
@@ -72,6 +73,7 @@ class TetrisEnv(gym.Env):
         self.level = 1
         self.points = 0
         self.clears = 0
+        self.tslots = 0
         self.shuffle()   #"i", "o", "t", "s", "z", "j", "l"
         self.cur_piece = self.spawn_piece(0)
         self.held_piece = None
@@ -97,6 +99,7 @@ class TetrisEnv(gym.Env):
         self.level = 1
         self.points = 0
         self.clears = 0
+        self.tslots = 0
         self.shuffle()   #"i", "o", "t", "s", "z", "j", "l"
         self.cur_piece = self.spawn_piece(0)
         self.held_piece = None
@@ -168,7 +171,6 @@ class TetrisEnv(gym.Env):
         old_lines = self.clears
         piece_steps = self.cur_piece.steps
         placed = False
-
         if self.screen is not None:
             import pygame
             for event in pygame.event.get():
@@ -183,7 +185,6 @@ class TetrisEnv(gym.Env):
         if action == 7:         #do nothing :)
             None
         self.cur_piece.steps += 1
-
         if action == 6:
             self.hold_piece()
             self.last_rotated = False
@@ -201,7 +202,6 @@ class TetrisEnv(gym.Env):
                 self.cur_piece.pos = (self.cur_piece.pos[0], self.cur_piece.pos[1] - 1)
                 self.cur_piece.pieces = [(r, c - 1) for r, c in self.cur_piece.pieces]
                 self.last_rotated = False
-
                 if self.lock:
                     self.lock_moves += 1
                     self.lock_timer = 0
@@ -216,9 +216,15 @@ class TetrisEnv(gym.Env):
                     self.lock_timer = 0
         if action == 2:
             self.rotate_cw()
+            if self.lock:
+                self.lock_moves += 1
+                self.lock_timer = 0
             
         if action == 3:
             self.rotate_acw()
+            if self.lock:
+                self.lock_moves += 1
+                self.lock_timer = 0
 
         frames_elapsed = dt / (1000.0 / 60.0)
         
@@ -382,149 +388,359 @@ class TetrisEnv(gym.Env):
             count += 1
         return 0, None
 
+    
+
     def get_every_move(self):
+        #     Moves: 0=left, 1=right, 2=rotate_cw, 3=rotate_ccw, 4=soft_drop, 5=hard_drop, 6=hold
+        #     all_moves: moves, type, rot_index, pos
         all_moves = []
 
-        for j in range(2):
-            for rot in range(4):
-                moves_left = []
-                moves_right = []
+        def rec_move(piece, dir, moves, hard):
+            # dir -1 is left, dir 1 is right
+            temp = moves.copy()
+            pos = self.hard_down(piece, piece.rot_index, True)
 
-                if j == 0:
-                    p_left = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())          #pseudo piece
-                    p_left.rot_index = self.cur_piece.rot_index
-                    p_right = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())
-                    p_right.rot_index = self.cur_piece.rot_index
+            if hard:
+                temp.append(5)
+                rot = piece.rot_index
+                if pos == None:
+                    return
+                all_moves.append([temp, piece.type, rot, pos])
+            else:
+                temp_pos = (piece.pos[0], piece.pos[1])
+                p_grav_counter = 0
+                while temp_pos != pos:
+                    while p_grav_counter >= 1:
+                        p_grav_counter -= 1
+                        if temp_pos == pos:
+                            break
+                        temp_pos = (temp_pos[0] + 1, temp_pos[1])
+                        
+                    p_grav_counter += self.gravity
+                    if temp_pos == pos:
+                        break
+                    temp_pos = (temp_pos[0] + 1, temp_pos[1])
+                    
+                    temp.append(4)
+                temp_piece = TetriminoObj((pos[0], pos[1]), piece.pieces.copy(), piece.type.copy())
+                temp_piece.rot_index = piece.rot_index
+                for i in range(2):
+                    
+                    kick = self.wall_kicks(0, temp_piece, temp_piece.rot_index, True)
+                    if kick != None:
+                        temp.append(2)
+                    else:
+                        break
+                    temp_piece.rot_index = kick[0]
+                    temp_piece.pos = kick[1]
+                    pos = (temp_piece.pos[0], temp_piece.pos[1])
+                    rot = temp_piece.rot_index
+                    if pos == None:
+                        return
+                    tempy = temp.copy()
+                    tempy.append(5)
+                    # offsets = PIECES[temp_piece.type][temp_piece.rot_index]
+                    # for i in range(len(temp_piece.pieces)):
+                    #     temp_piece.pieces[i] = (temp_piece.pos[0] + offsets[i][0], temp_piece.pos[1] + offsets[i][1])
+
+                    
+                    if self.pos_in_all_moves(all_moves, pos, rot, piece.type, tempy)[0] == 0:
+                        all_moves.append([tempy, piece.type, rot, pos])
+
+
+                    
+            ends = self.left_and_right(piece.pieces)
+            if dir == -1 and ends[0] <= 0:
+                return 
+            elif dir == 1 and ends[1] >= 9:
+                return
+            
+            if self.get_side_obstruct(piece.pieces, dir):
+                return
+            else:
+                piece.pos = (piece.pos[0], piece.pos[1] + dir)
+                if dir == -1:
+                    moves.append(0)
+                elif dir == 1:
+                    moves.append(1)
+                offsets = PIECES[piece.type][piece.rot_index]
+                for i in range(len(piece.pieces)):
+                    piece.pieces[i] = (piece.pos[0] + offsets[i][0], piece.pos[1] + offsets[i][1])
+                
+                rec_move(piece, dir, moves, hard)
+        for k in range(2):
+            for i in range(4):
+                if k == 0:
+                    piece_l = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())
+                    piece_r = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())
+                    piece_l.rot_index = self.cur_piece.rot_index
+                    piece_r.rot_index = self.cur_piece.rot_index
+
+                    piece_ls = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())
+                    piece_rs = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())
+                    piece_ls.rot_index = self.cur_piece.rot_index
+                    piece_rs.rot_index = self.cur_piece.rot_index
+                    
+                    if i == 0:
+                        rec_move(piece_l, -1, [], True)
+                        rec_move(piece_r, 1, [], True)
+                        rec_move(piece_ls, -1, [], False)
+                        rec_move(piece_rs, 1, [], False)
+                    elif i == 1:
+                        kick_l = self.wall_kicks(0, piece_l, piece_l.rot_index, True)
+                        if kick_l != None:
+                            piece_l.rot_index = kick_l[0]
+
+                        kick_r = self.wall_kicks(0, piece_r, piece_r.rot_index, True)
+                        if kick_r != None:
+                            piece_r.rot_index = kick_r[0]
+
+                        rec_move(piece_l, -1, [2], True)
+                        rec_move(piece_r, 1, [2], True)
+
+
+                        kick_ls = self.wall_kicks(0, piece_ls, piece_ls.rot_index, True)
+                        if kick_ls != None:
+                            piece_ls.rot_index = kick_ls[0]
+
+                        kick_rs = self.wall_kicks(0, piece_rs, piece_rs.rot_index, True)
+                        if kick_rs != None:
+                            piece_rs.rot_index = kick_rs[0]
+
+                        rec_move(piece_ls, -1, [2], False)
+                        rec_move(piece_rs, 1, [2], False)
+                    elif i == 2:
+                        kick_l = self.wall_kicks(0, piece_l, piece_l.rot_index, True)
+                        if kick_l != None:
+                            piece_l.rot_index = kick_l[0]
+
+                        kick_r = self.wall_kicks(0, piece_r, piece_r.rot_index, True)
+                        if kick_r != None:
+                            piece_r.rot_index = kick_r[0]
+
+
+                        kick_l = self.wall_kicks(0, piece_l, piece_l.rot_index, True)
+                        if kick_l != None:
+                            piece_l.rot_index = kick_l[0]
+
+                        kick_r = self.wall_kicks(0, piece_r, piece_r.rot_index, True)
+                        if kick_r != None:
+                            piece_r.rot_index = kick_r[0]
+
+                        rec_move(piece_l, -1, [2, 2], True)
+                        rec_move(piece_r, 1, [2, 2], True)
+
+
+                        kick_ls = self.wall_kicks(0, piece_ls, piece_ls.rot_index, True)
+                        if kick_ls != None:
+                            piece_ls.rot_index = kick_ls[0]
+
+                        kick_rs = self.wall_kicks(0, piece_rs, piece_rs.rot_index, True)
+                        if kick_rs != None:
+                            piece_rs.rot_index = kick_rs[0]
+
+
+                        kick_ls = self.wall_kicks(0, piece_ls, piece_ls.rot_index, True)
+                        if kick_ls != None:
+                            piece_ls.rot_index = kick_ls[0]
+
+                        kick_rs = self.wall_kicks(0, piece_rs, piece_rs.rot_index, True)
+                        if kick_rs != None:
+                            piece_rs.rot_index = kick_rs[0]
+
+                        rec_move(piece_ls, -1, [2, 2], False)
+                        rec_move(piece_rs, 1, [2, 2], False)
+                    elif i == 3:
+                        kick_l = self.wall_kicks(1, piece_l, piece_l.rot_index, True)
+                        if kick_l != None:
+                            piece_l.rot_index = kick_l[0]
+
+                        kick_r = self.wall_kicks(1, piece_r, piece_r.rot_index, True)
+                        if kick_r != None:
+                            piece_r.rot_index = kick_r[0]
+
+                        rec_move(piece_l, -1, [3], True)
+                        rec_move(piece_r, 1, [3], True)
+
+
+                        kick_ls = self.wall_kicks(1, piece_ls, piece_ls.rot_index, True)
+                        if kick_ls != None:
+                            piece_ls.rot_index = kick_ls[0]
+
+                        kick_rs = self.wall_kicks(1, piece_rs, piece_rs.rot_index, True)
+                        if kick_rs != None:
+                            piece_rs.rot_index = kick_rs[0]
+                            
+                        rec_move(piece_ls, -1, [3], False)
+                        rec_move(piece_rs, 1, [3], False)
                 else:
+                    piece_l = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())
+                    piece_r = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())
+                    piece_l.rot_index = self.cur_piece.rot_index
+                    piece_r.rot_index = self.cur_piece.rot_index
+
                     if self.held_piece == None:
                         held = self.spawn_piece(0, True)
-                        p_left = TetriminoObj((held.pos[0], held.pos[1]), held.pieces.copy(), held.type.copy())          #pseudo piece
-                        p_left.rot_index = held.rot_index
-                        p_right = TetriminoObj((held.pos[0], held.pos[1]), held.pieces.copy(), held.type.copy())
-                        p_right.rot_index = held.rot_index
+                        piece_l = TetriminoObj((held.pos[0], held.pos[1]), held.pieces.copy(), held.type.copy())          #pseudo piece
+                        piece_l.rot_index = held.rot_index
+                        piece_r = TetriminoObj((held.pos[0], held.pos[1]), held.pieces.copy(), held.type.copy())
+                        piece_r.rot_index = held.rot_index
                     else:
-                        p_left = TetriminoObj((self.held_piece.pos[0], self.held_piece.pos[1]), self.held_piece.pieces.copy(), self.held_piece.type.copy())          #pseudo piece
-                        p_left.rot_index = self.held_piece.rot_index
-                        p_right = TetriminoObj((self.held_piece.pos[0], self.held_piece.pos[1]), self.held_piece.pieces.copy(), self.held_piece.type.copy())
-                        p_right.rot_index = self.held_piece.rot_index
+                        piece_l = TetriminoObj((self.held_piece.pos[0], self.held_piece.pos[1]), self.held_piece.pieces.copy(), self.held_piece.type.copy())          #pseudo piece
+                        piece_l.rot_index = self.held_piece.rot_index
+                        piece_r = TetriminoObj((self.held_piece.pos[0], self.held_piece.pos[1]), self.held_piece.pieces.copy(), self.held_piece.type.copy())
+                        piece_r.rot_index = self.held_piece.rot_index
 
-                    moves_left.append(6)
-                    moves_right.append(6)
-                
-                if rot == 2:
-                    temp_l = self.wall_kicks(1, p_left, p_left.rot_index, True)
-                    if temp_l == None:
-                        None
-                    else:
-                        p_left.rot_index = temp_l
-
-                    temp_r = self.wall_kicks(1, p_right, p_right.rot_index, True)
-                    if temp_r == None:
-                        None
-                    else:
-                        p_right.rot_index = temp_r
-
-                    moves_left.append(3)
-                    moves_right.append(3)
-                
-                elif rot != 3:
-                    if rot == 0:
-                        temp_l = self.wall_kicks(1, p_left, p_left.rot_index, True)
-                        if temp_l == None:
-                            None
-                        else:
-                            p_left.rot_index = temp_l
-                        
-                        temp_r = self.wall_kicks(1, p_right, p_right.rot_index, True)
-                        if temp_r == None:
-                            None
-                        else:
-                            p_right.rot_index = temp_r
-
-                        moves_left.append(2)
-                        moves_right.append(2)
-                    if rot == 1:
-                        temp_l = self.wall_kicks(1, p_left, p_left.rot_index, True)
-                        if temp_l == None:
-                            None
-                        else:
-                            p_left.rot_index = temp_l
-                        
-                        temp_r = self.wall_kicks(1, p_right, p_right.rot_index, True)
-                        if temp_r == None:
-                            None
-                        else:
-                            p_right.rot_index = temp_r
-
-                        temp_l = self.wall_kicks(1, p_left, p_left.rot_index, True)
-                        if temp_l == None:
-                            None
-                        else:
-                            p_left.rot_index = temp_l
-                        
-                        temp_r = self.wall_kicks(1, p_right, p_right.rot_index, True)
-                        if temp_r == None:
-                            None
-                        else:
-                            p_right.rot_index = temp_r
-
-                        moves_left.append(2)
-                        moves_left.append(2)
-                        moves_right.append(2)
-                        moves_right.append(2)
-                for i in range(9):
-                    p_grav_counter = 0
-                    if p_grav_counter >= 1:
-                        p_grav_counter -= 1
-                        p_left.pos = (p_left.pos[0] + 1, p_left.pos[1])
-                        p_right.pos = (p_right.pos[0] + 1, p_right.pos[1])
-                    
-                    if self.left_and_right(p_left.pieces)[0] > 0 and not(self.get_side_obstruct(p_left.pieces, -1)):
-                        print("fuck")
-                        print(p_left.pos)
-                        print(p_left.pieces)
-                        t_pos = self.hard_down(p_left, p_left.rot_index, True)
-
-                        temp = moves_left.copy()
-                        found = self.pos_in_all_moves(all_moves, t_pos, p_left.rot_index, p_left.type, temp + [5])
-                        if found[0] == 0:
-                            temp.append(5)
-                            all_moves.append([temp, p_left.type, p_left.rot_index, t_pos])
-                        elif found[0] == -1:
-                            temp.append(5)
-                            all_moves[found[1]] = [temp, p_left.type, p_left.rot_index, t_pos]
-                        
-                        # temp.append(5)
-                        # all_moves.append([temp, p_left.type, p_left.rot_index, t_pos])
-
-                        p_left.pos = (p_left.pos[0], p_left.pos[1] - 1)
-                        p_left.pieces = [(r, c - 1) for r, c in p_left.pieces]
-                        moves_left.append(0)
-                        
-                        
-                    if self.left_and_right(p_right.pieces)[1] < 9 and not(self.get_side_obstruct(p_right.pieces, 1)):
-                        t_pos = self.hard_down(p_right, p_right.rot_index, True)
-
-                        temp = moves_right.copy()
-                        found = self.pos_in_all_moves(all_moves, t_pos, p_right.rot_index, p_right.type, temp + [5])
-                        if found[0] == 0:
-                            temp.append(5)
-                            all_moves.append([temp, p_right.type, p_right.rot_index, t_pos])
-                        elif found[0] == -1:
-                            temp.append(5)
-                            all_moves[found[1]] = [temp, p_right.type, p_right.rot_index, t_pos]
-                        
-                        # temp.append(5)
-                        # all_moves.append([temp, p_right.type, p_right.rot_index, t_pos])
-
-                        p_right.pos = (p_right.pos[0], p_right.pos[1] + 1)
-                        p_right.pieces = [(r, c + 1) for r, c in p_right.pieces]
-                        moves_right.append(1)
-                        
-                        
-
-                    p_grav_counter += self.gravity
+                    rec_move(piece_l, -1, [6], False)
+                    rec_move(piece_r, 1, [6], False)
         return all_moves
+            
+
+
+    # def get_every_move(self):
+    #     all_moves = []
+
+    #     for j in range(2):
+    #         for rot in range(4):
+    #             moves_left = []
+    #             moves_right = []
+
+    #             if j == 0:
+    #                 p_left = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())          #pseudo piece
+    #                 p_left.rot_index = self.cur_piece.rot_index
+    #                 p_right = TetriminoObj((self.cur_piece.pos[0], self.cur_piece.pos[1]), self.cur_piece.pieces.copy(), self.cur_piece.type.copy())
+    #                 p_right.rot_index = self.cur_piece.rot_index
+    #             else:
+    #                 if self.held_piece == None:
+    #                     held = self.spawn_piece(0, True)
+    #                     p_left = TetriminoObj((held.pos[0], held.pos[1]), held.pieces.copy(), held.type.copy())          #pseudo piece
+    #                     p_left.rot_index = held.rot_index
+    #                     p_right = TetriminoObj((held.pos[0], held.pos[1]), held.pieces.copy(), held.type.copy())
+    #                     p_right.rot_index = held.rot_index
+    #                 else:
+    #                     p_left = TetriminoObj((self.held_piece.pos[0], self.held_piece.pos[1]), self.held_piece.pieces.copy(), self.held_piece.type.copy())          #pseudo piece
+    #                     p_left.rot_index = self.held_piece.rot_index
+    #                     p_right = TetriminoObj((self.held_piece.pos[0], self.held_piece.pos[1]), self.held_piece.pieces.copy(), self.held_piece.type.copy())
+    #                     p_right.rot_index = self.held_piece.rot_index
+
+    #                 moves_left.append(6)
+    #                 moves_right.append(6)
+                
+    #             if rot == 2:
+    #                 temp_l = self.wall_kicks(1, p_left, p_left.rot_index, True)
+    #                 if temp_l == None:
+    #                     None
+    #                 else:
+    #                     p_left.rot_index = temp_l
+
+    #                 temp_r = self.wall_kicks(1, p_right, p_right.rot_index, True)
+    #                 if temp_r == None:
+    #                     None
+    #                 else:
+    #                     p_right.rot_index = temp_r
+
+    #                 moves_left.append(3)
+    #                 moves_right.append(3)
+                
+    #             elif rot != 3:
+    #                 if rot == 0:
+    #                     temp_l = self.wall_kicks(1, p_left, p_left.rot_index, True)
+    #                     if temp_l == None:
+    #                         None
+    #                     else:
+    #                         p_left.rot_index = temp_l
+                        
+    #                     temp_r = self.wall_kicks(1, p_right, p_right.rot_index, True)
+    #                     if temp_r == None:
+    #                         None
+    #                     else:
+    #                         p_right.rot_index = temp_r
+
+    #                     moves_left.append(2)
+    #                     moves_right.append(2)
+    #                 if rot == 1:
+    #                     temp_l = self.wall_kicks(1, p_left, p_left.rot_index, True)
+    #                     if temp_l == None:
+    #                         None
+    #                     else:
+    #                         p_left.rot_index = temp_l
+                        
+    #                     temp_r = self.wall_kicks(1, p_right, p_right.rot_index, True)
+    #                     if temp_r == None:
+    #                         None
+    #                     else:
+    #                         p_right.rot_index = temp_r
+
+    #                     temp_l = self.wall_kicks(1, p_left, p_left.rot_index, True)
+    #                     if temp_l == None:
+    #                         None
+    #                     else:
+    #                         p_left.rot_index = temp_l
+                        
+    #                     temp_r = self.wall_kicks(1, p_right, p_right.rot_index, True)
+    #                     if temp_r == None:
+    #                         None
+    #                     else:
+    #                         p_right.rot_index = temp_r
+
+    #                     moves_left.append(2)
+    #                     moves_left.append(2)
+    #                     moves_right.append(2)
+    #                     moves_right.append(2)
+    #             for i in range(9):
+    #                 p_grav_counter = 0
+    #                 if p_grav_counter >= 1:
+    #                     p_grav_counter -= 1
+    #                     p_left.pos = (p_left.pos[0] + 1, p_left.pos[1])
+    #                     p_right.pos = (p_right.pos[0] + 1, p_right.pos[1])
+                    
+    #                 if self.left_and_right(p_left.pieces)[0] > 0 and not(self.get_side_obstruct(p_left.pieces, -1)):
+    #                     print("fuck")
+    #                     print(p_left.pos)
+    #                     print(p_left.pieces)
+    #                     t_pos = self.hard_down(p_left, p_left.rot_index, True)
+
+    #                     temp = moves_left.copy()
+    #                     found = self.pos_in_all_moves(all_moves, t_pos, p_left.rot_index, p_left.type, temp + [5])
+    #                     if found[0] == 0:
+    #                         temp.append(5)
+    #                         all_moves.append([temp, p_left.type, p_left.rot_index, t_pos])
+    #                     elif found[0] == -1:
+    #                         temp.append(5)
+    #                         all_moves[found[1]] = [temp, p_left.type, p_left.rot_index, t_pos]
+                        
+    #                     # temp.append(5)
+    #                     # all_moves.append([temp, p_left.type, p_left.rot_index, t_pos])
+
+    #                     p_left.pos = (p_left.pos[0], p_left.pos[1] - 1)
+    #                     p_left.pieces = [(r, c - 1) for r, c in p_left.pieces]
+    #                     moves_left.append(0)
+                        
+                        
+    #                 if self.left_and_right(p_right.pieces)[1] < 9 and not(self.get_side_obstruct(p_right.pieces, 1)):
+    #                     t_pos = self.hard_down(p_right, p_right.rot_index, True)
+
+    #                     temp = moves_right.copy()
+    #                     found = self.pos_in_all_moves(all_moves, t_pos, p_right.rot_index, p_right.type, temp + [5])
+    #                     if found[0] == 0:
+    #                         temp.append(5)
+    #                         all_moves.append([temp, p_right.type, p_right.rot_index, t_pos])
+    #                     elif found[0] == -1:
+    #                         temp.append(5)
+    #                         all_moves[found[1]] = [temp, p_right.type, p_right.rot_index, t_pos]
+                        
+    #                     # temp.append(5)
+    #                     # all_moves.append([temp, p_right.type, p_right.rot_index, t_pos])
+
+    #                     p_right.pos = (p_right.pos[0], p_right.pos[1] + 1)
+    #                     p_right.pieces = [(r, c + 1) for r, c in p_right.pieces]
+    #                     moves_right.append(1)
+                        
+                        
+
+    #                 p_grav_counter += self.gravity
+    #     return all_moves
+
 
     def simulate_conditions(self, move):
         board = self.board.copy()
@@ -536,14 +752,26 @@ class TetrisEnv(gym.Env):
         holiness = ((self.get_holes(board) / 230) * 2) - 1
         agg_height = ((self.get_aggregate_height(board) / 240) * 2) - 1
 
-        cleared = self.check_clear(0, board, True)
+        clear_and_type = self.check_clear(0, board, True)
+        cleared = clear_and_type[0]
         cleared = ((cleared / 4) * 2) - 1
 
         piece_1 = ((self.next_pieces[0] / 7) * 2) - 1
         piece_2 = ((self.next_pieces[1] / 7) * 2) - 1
         piece_3 = ((self.next_pieces[2] / 7) * 2) - 1
 
-        return bumpiness, holiness, agg_height, cleared
+        created_t = 0
+
+        new_tslots = len(self.detect_t_slots(board))
+        if new_tslots > self.tslots:
+            created_t = 1
+        elif new_tslots < self.tslots:
+            created_t = -1
+
+        is_tspin = clear_and_type[1]
+
+
+        return bumpiness, holiness, agg_height, cleared, created_t, is_tspin, piece_1, piece_2, piece_3
 
 
     
@@ -569,7 +797,6 @@ class TetrisEnv(gym.Env):
 
         while running:
             dt = self.clock.tick(60)
-            
             # Update gravity based on current level
             self.get_gravity()
             
@@ -771,6 +998,7 @@ class TetrisEnv(gym.Env):
         for i in pieces:
             if self.board[i[0]][i[1] + dir] != 0:
                 return True
+        return False
 
     def left_and_right(self, pieces):
         left = 9
@@ -782,12 +1010,12 @@ class TetrisEnv(gym.Env):
                 right = i[1]
         return left, right
 
-    def check_tmini(self):      # returns -1 = no tspin, 0 = mini, 1 = full
+    def check_tmini(self, cur_piece):      # returns -1 = no tspin, 0 = mini, 1 = full
         rows = len(self.board)
         cols = len(self.board[0])
 
-        r = self.cur_piece.pos[0]
-        c = self.cur_piece.pos[1]
+        r = cur_piece.pos[0]
+        c = cur_piece.pos[1]
 
         # diag[0]=top-left, diag[1]=top-right, diag[2]=bot-left, diag[3]=bot-right
         diag = [0, 0, 0, 0]
@@ -813,16 +1041,16 @@ class TetrisEnv(gym.Env):
 
         # Check "facing direction" T-Spin (full)
         # Your original checks kept exactly as written:
-        if self.cur_piece.rot_index == 0:     # facing up
+        if cur_piece.rot_index == 0:     # facing up
             if diag[0] and diag[1]:
                 return 1
-        elif self.cur_piece.rot_index == 1:   # facing right
+        elif cur_piece.rot_index == 1:   # facing right
             if diag[1] and diag[3]:
                 return 1
-        elif self.cur_piece.rot_index == 2:   # facing down
+        elif cur_piece.rot_index == 2:   # facing down
             if diag[2] and diag[3]:
                 return 1
-        elif self.cur_piece.rot_index == 3:   # facing left
+        elif cur_piece.rot_index == 3:   # facing left
             if diag[0] and diag[2]:
                 return 1
 
@@ -835,7 +1063,7 @@ class TetrisEnv(gym.Env):
         type_clear = -1     #type clear to depend points, -1 normal clear, 0 tspin mini, 1 tspin
         if not(pseudo):
             if cur_piece.type == 3:
-                type_clear = self.check_tmini()
+                type_clear = self.check_tmini(cur_piece)
         
         for r in range(len(board)):
             if all(cell != 0 for cell in board[r]):
@@ -881,7 +1109,7 @@ class TetrisEnv(gym.Env):
                 self.add_points(5, 0)
             return type_clear
         else:
-            return cleared
+            return cleared, type_clear
         
     def get_ghost_position(self):
         """Calculate where the ghost piece (hard drop preview) should be"""
@@ -924,7 +1152,7 @@ class TetrisEnv(gym.Env):
         offsets = PIECES[piece_type][rot]
         return [(r + off[0], c + off[1]) for off in offsets]
 
-    def can_rotate_into_slot(self, anchor, target_rot, piece_type=3):
+    def can_rotate_into_slot(self, anchor, target_rot, board, piece_type=3):
         """
         Return True if there exists a legal starting placement (row, col, rotation)
         from which a single rotation (cw or acw with wall kicks) will produce the
@@ -934,8 +1162,8 @@ class TetrisEnv(gym.Env):
         It does not attempt full pathfinding from spawn; it only verifies that a rotation
         + wall-kick can place the piece into the candidate cells from some feasible starting cell.
         """
-        rows = len(self.board)
-        cols = len(self.board[0])
+        rows = len(board)
+        cols = len(board[0])
 
         # compute the target absolute positions we want to match after rotation+kick
         target_positions = set(self._positions_for(anchor, target_rot, piece_type))
@@ -944,7 +1172,7 @@ class TetrisEnv(gym.Env):
         def is_empty_cell(rr, cc):
             if rr < 0 or rr >= rows or cc < 0 or cc >= cols:
                 return False
-            return self.board[rr][cc] == 0
+            return board[rr][cc] == 0
 
         # Search plausible starting rows and columns.
         # We only need to search rows above or at the anchor (pieces drop from above),
@@ -962,7 +1190,7 @@ class TetrisEnv(gym.Env):
                     # ensure start positions are fully in bounds and empty (the piece could be "there" before rotation)
                     ok_start = True
                     for (sr, sc) in start_positions:
-                        if sr < 0 or sr >= rows or sc < 0 or sc >= cols or self.board[sr][sc] != 0:
+                        if sr < 0 or sr >= rows or sc < 0 or sc >= cols or board[sr][sc] != 0:
                             ok_start = False
                             break
                     if not ok_start:
@@ -999,7 +1227,7 @@ class TetrisEnv(gym.Env):
                                 if rr < 0 or rr >= rows or cc < 0 or cc >= cols:
                                     collision = True
                                     break
-                                if self.board[rr][cc] != 0:
+                                if board[rr][cc] != 0:
                                     collision = True
                                     break
                                 result_positions.append((rr, cc))
@@ -1012,7 +1240,7 @@ class TetrisEnv(gym.Env):
         # no found start pos that rotates into the target slot
         return False
 
-    def detect_t_slots(self):
+    def detect_t_slots(self, board):
         """
         Scan the board for potential T-Spin slots (3x3 T-boxes).
         Returns: list of candidates. Each candidate is a dict:
@@ -1024,15 +1252,15 @@ class TetrisEnv(gym.Env):
             "is_full": bool,             # heuristic full vs mini (same check as check_tmini)
         }
         """
-        rows = len(self.board)
-        cols = len(self.board[0])
+        rows = len(board)
+        cols = len(board[0])
         piece_type = 3  # T piece type in your code
 
         def filled(rr, cc):
             # out-of-bounds counts as filled (wall)
             if rr < 0 or rr >= rows or cc < 0 or cc >= cols:
                 return True
-            return self.board[rr][cc] != 0
+            return board[rr][cc] != 0
 
         candidates = []
 
@@ -1062,7 +1290,7 @@ class TetrisEnv(gym.Env):
                         if pr < 0 or pr >= rows or pc < 0 or pc >= cols:
                             can_fit = False
                             break
-                        if self.board[pr][pc] != 0:
+                        if board[pr][pc] != 0:
                             can_fit = False
                             break
 
@@ -1084,8 +1312,8 @@ class TetrisEnv(gym.Env):
                     elif rot == 3:   # facing left
                         if corner_status[0] and corner_status[2]:
                             full = True
-                    if not self.can_rotate_into_slot((r, c), rot): continue
-                    if self.can_drop_straight_into_slot((r,c), rot): continue
+                    if not self.can_rotate_into_slot((r, c), rot, board): continue
+                    if self.can_drop_straight_into_slot((r,c), rot, board): continue
                     candidates.append({
                         "anchor": (r, c),
                         "corner_count": corner_count,
@@ -1096,14 +1324,14 @@ class TetrisEnv(gym.Env):
 
         return candidates
 
-    def can_drop_straight_into_slot(self, anchor, target_rot, piece_type=3):
+    def can_drop_straight_into_slot(self, anchor, target_rot, board, piece_type=3):
         """
         Returns True if the target slot can be reached without rotating
         (just moving horizontally and dropping straight down).
         That makes it NOT a real T-spin slot.
         """
-        rows = len(self.board)
-        cols = len(self.board[0])
+        rows = len(board)
+        cols = len(board[0])
         found = False
 
         target_positions = set(self._positions_for(anchor, target_rot, piece_type))
@@ -1127,7 +1355,7 @@ class TetrisEnv(gym.Env):
                 for nr, nc in next_positions:
                     if nr >= rows or nc < 0 or nc >= cols:
                         break
-                    if self.board[nr][nc] != 0:
+                    if board[nr][nc] != 0:
                         break
 
                 else:
@@ -1137,12 +1365,12 @@ class TetrisEnv(gym.Env):
 
                 break
 
-        return found, 
+        return found
 
 
     def tslot_exists(self):
         """Boolean quick-check: True if any T-slot candidate exists on board."""
-        return len(self.detect_t_slots()) > 0
+        return len(self.detect_t_slots(self.board)) > 0
 
 
     
@@ -1155,7 +1383,8 @@ class TetrisEnv(gym.Env):
         for offset in offsets:
             block_row = cur_piece.pos[0] + offset[0]
             block_col = cur_piece.pos[1] + offset[1]
-            print(f"({block_row}, {block_col})")
+            if block_col > 9:
+                return
             # Find how far this block can drop
             drop_distance = 0
             for check_row in range(block_row + 1, len(self.board)):
@@ -1199,7 +1428,7 @@ class TetrisEnv(gym.Env):
         return False, None
 
     def new_piece(self):
-        print(self.get_every_move())
+        self.tslots = len(self.detect_t_slots(self.board))
         game_over = self.check_end()
         if game_over == True:
             return True, -1
@@ -1256,8 +1485,6 @@ class TetrisEnv(gym.Env):
         return holes
 
     def wall_kicks(self, dir, cur_piece, rot_index, pseudo=False):           #use when rotating, direction: 0 clockwise, 1 anticlockwise
-        print(rot_index)
-        print("retard")
         num_kick = 0
         if dir == 0:
             temp_in = (rot_index + 1) % 4
@@ -1265,7 +1492,7 @@ class TetrisEnv(gym.Env):
         elif dir == 1:
             temp_in = (rot_index - 1) % 4
             num_kick = 8 - 2*rot_index
-        
+
         offsets = PIECES[cur_piece.type][temp_in]
 
         for j in range(len(WALL_KICKS[1])):
@@ -1308,7 +1535,8 @@ class TetrisEnv(gym.Env):
                     cur_piece.pos = (cur_piece.pos[0] + WALL_KICKS_I[num_kick][j][0], cur_piece.pos[1] + WALL_KICKS_I[num_kick][j][1])
                 else:
                     cur_piece.pos = (cur_piece.pos[0] + WALL_KICKS[num_kick][j][0], cur_piece.pos[1] + WALL_KICKS[num_kick][j][1])  
-                return rot_index
+                
+                return rot_index, cur_piece.pos
             
     def get_gravity(self):
         gravity = [1/60, 1/40, 1/30, 1/20, 1/15, 1/12, 1/10, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 1.5, 2, 3, 4, 5, 20]
@@ -1462,10 +1690,8 @@ class TetrisEnv(gym.Env):
         
         # Debug: print number of moves found
         if len(all_moves) == 0:
-            print("No moves found!")
             return
         
-        print(f"Found {len(all_moves)} possible moves")
         
         # Store all final positions after executing moves
         ghost_positions_list = []
@@ -1476,79 +1702,74 @@ class TetrisEnv(gym.Env):
                 temp_piece = TetriminoObj((3, 3), [], piece_type)
             else:
                 temp_piece = TetriminoObj((4, 3), [], piece_type)
-            
+            temp_piece.pos = (self.cur_piece.pos[0], self.cur_piece.pos[1])
             temp_piece.type = piece_type
-            temp_piece.rot_index = 0
+            temp_piece.rot_index = rot
             
-            # Initialize piece positions
-            offsets = PIECES[temp_piece.type][0]
-            top_row = 3 if piece_type == 1 else 4
-            left_col = 3
-            temp_piece.pieces = [(top_row + r, left_col + c) for r, c in offsets]
-            temp_piece.pos = (top_row, left_col)
             
-            # Execute each move in sequence
-            for move in moves:
-                if move == 0:  # Left
-                    if self.left_and_right(temp_piece.pieces)[0] > 0 and not self.get_side_obstruct(temp_piece.pieces, -1):
-                        temp_piece.pos = (temp_piece.pos[0], temp_piece.pos[1] - 1)
-                        temp_piece.pieces = [(r, c - 1) for r, c in temp_piece.pieces]
+            offsets = PIECES[piece_type][rot]
+            temp_piece.pieces = [(final_pos[0] + r, final_pos[1] + c) for r, c in offsets]
+            
+            # # Execute each move in sequence
+            # for move in moves:
+            #     if move == 0:  # Left
+            #         temp_piece.pos = (temp_piece.pos[0], temp_piece.pos[1] - 1)
+            #         temp_piece.pieces = [(r, c - 1) for r, c in temp_piece.pieces]
                         
-                elif move == 1:  # Right
-                    if self.left_and_right(temp_piece.pieces)[1] < 9 and not self.get_side_obstruct(temp_piece.pieces, 1):
-                        temp_piece.pos = (temp_piece.pos[0], temp_piece.pos[1] + 1)
-                        temp_piece.pieces = [(r, c + 1) for r, c in temp_piece.pieces]
+            #     elif move == 1:  # Right
+            #         temp_piece.pos = (temp_piece.pos[0], temp_piece.pos[1] + 1)
+            #         temp_piece.pieces = [(r, c + 1) for r, c in temp_piece.pieces]
                         
-                elif move == 2:  # Rotate CW
-                    temp_rot = self.wall_kicks(0, temp_piece, temp_piece.rot_index, True)
-                    if temp_rot is not None:
-                        temp_piece.rot_index = temp_rot
+            #     elif move == 2:  # Rotate CW
+            #         temp_rot = self.wall_kicks(0, temp_piece, temp_piece.rot_index, True)
+            #         if temp_rot is not None:
+            #             temp_piece.rot_index = temp_rot
                         
-                elif move == 3:  # Rotate ACW
-                    temp_rot = self.wall_kicks(1, temp_piece, temp_piece.rot_index, True)
-                    if temp_rot is not None:
-                        temp_piece.rot_index = temp_rot
+            #     elif move == 3:  # Rotate ACW
+            #         temp_rot = self.wall_kicks(1, temp_piece, temp_piece.rot_index, True)
+            #         if temp_rot is not None:
+            #             temp_piece.rot_index = temp_rot
                         
-                elif move == 5:  # Hard drop
-                    max_drop = len(self.board)
-                    offsets_drop = PIECES[temp_piece.type][temp_piece.rot_index]
+            #     elif move == 5:  # Hard drop
+            #         max_drop = len(self.board)
+            #         offsets_drop = PIECES[temp_piece.type][temp_piece.rot_index]
                     
-                    for offset in offsets_drop:
-                        block_row = temp_piece.pos[0] + offset[0]
-                        block_col = temp_piece.pos[1] + offset[1]
+            #         for offset in offsets_drop:
+            #             block_row = temp_piece.pos[0] + offset[0]
+            #             block_col = temp_piece.pos[1] + offset[1]
                         
-                        drop_distance = 0
-                        for check_row in range(block_row + 1, len(self.board)):
-                            if self.board[check_row][block_col] != 0:
-                                break
-                            drop_distance += 1
-                        else:
-                            drop_distance = len(self.board) - block_row - 1
+            #             drop_distance = 0
+            #             for check_row in range(block_row + 1, len(self.board)):
+            #                 if self.board[check_row][block_col] != 0:
+            #                     break
+            #                 drop_distance += 1
+            #             else:
+            #                 drop_distance = len(self.board) - block_row - 1
                         
-                        max_drop = min(max_drop, drop_distance)
+            #             max_drop = min(max_drop, drop_distance)
                     
-                    temp_piece.pos = (temp_piece.pos[0] + max_drop, temp_piece.pos[1])
-                    temp_piece.pieces = [(r + max_drop, c) for r, c in temp_piece.pieces]
+            #         temp_piece.pos = (temp_piece.pos[0] + max_drop, temp_piece.pos[1])
+            #         temp_piece.pieces = [(r + max_drop, c) for r, c in temp_piece.pieces]
                     
-                elif move == 6:  # Hold
-                    # For hold moves, reinitialize with held piece
-                    if self.held_piece is None:
-                        held_type = self.next_pieces[0] if len(self.next_pieces) > 0 else 1
-                    else:
-                        held_type = self.held_piece.type
+            #     elif move == 6:  # Hold
+            #         # For hold moves, reinitialize with held piece
+            #         if self.held_piece is None:
+            #             held_type = self.next_pieces[0] if len(self.next_pieces) > 0 else 1
+            #         else:
+            #             held_type = self.held_piece.type
                     
-                    if held_type == 1:
-                        temp_piece = TetriminoObj((3, 3), [], held_type)
-                        top_row = 3
-                    else:
-                        temp_piece = TetriminoObj((4, 3), [], held_type)
-                        top_row = 4
+            #         if held_type == 1:
+            #             temp_piece = TetriminoObj((3, 3), [], held_type)
+            #             top_row = 3
+            #         else:
+            #             temp_piece = TetriminoObj((4, 3), [], held_type)
+            #             top_row = 4
                     
-                    temp_piece.type = held_type
-                    temp_piece.rot_index = 0
-                    offsets = PIECES[temp_piece.type][0]
-                    temp_piece.pieces = [(top_row + r, left_col + c) for r, c in offsets]
-                    temp_piece.pos = (top_row, left_col)
+            #         temp_piece.type = held_type
+            #         temp_piece.rot_index = 0
+            #         offsets = PIECES[temp_piece.type][0]
+            #         temp_piece.pieces = [(top_row + r, left_col + c) for r, c in offsets]
+            #         temp_piece.pos = (top_row, left_col)
             
             # Store the final positions
             ghost_positions_list.append((temp_piece.pieces.copy(), piece_type))
@@ -1626,14 +1847,14 @@ class TetrisEnv(gym.Env):
         if temp == None:
             None
         else:
-            self.cur_piece.rot_index = temp
+            self.cur_piece.rot_index = temp[0]
 
     def rotate_acw(self):
         temp = self.wall_kicks(1, self.cur_piece, self.cur_piece.rot_index)
         if temp == None:
             None
         else:
-            self.cur_piece.rot_index = temp
+            self.cur_piece.rot_index = temp[0]
 
 register(
     id='Tetris-v1',
